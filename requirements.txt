@@ -1,0 +1,4 @@
+﻿streamlit>=1.39
+pandas
+numpy
+altair

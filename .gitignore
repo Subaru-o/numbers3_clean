@@ -1,0 +1,22 @@
+﻿# Python / venv
+__pycache__/
+.venv/
+*.pyc
+
+# Local env
+.env
+*.log
+
+# Raw / Big data
+data/raw/
+data/raw_fixed/
+artifacts/models*/
+artifacts/**/models*/
+artifacts/**/*.joblib
+*.joblib
+*.pkl
+*.onnx
+
+# OS
+.DS_Store
+Thumbs.db

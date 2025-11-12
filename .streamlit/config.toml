@@ -1,0 +1,3 @@
+﻿[server]
+headless = true
+enableXsrfProtection = true

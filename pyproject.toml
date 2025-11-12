@@ -1,0 +1,51 @@
+[build-system]
+requires = ["setuptools>=69", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "numbers3-n3"
+version = "0.1.0"
+description = "Numbers3 prediction & analysis toolkit"
+readme = "README.md"
+requires-python = ">=3.10"
+authors = [{ name = "Subaru" }]
+license = { text = "MIT" }
+
+# 主要ライブラリ（最低限）
+dependencies = [
+  "pandas>=2.2",
+  "numpy>=1.26",
+  "scikit-learn>=1.3",
+  "xgboost>=2.0",
+  "shap>=0.45",
+  "matplotlib>=3.8",
+  "streamlit>=1.30",
+  "joblib>=1.3",
+  "pyarrow>=14",
+  "tqdm>=4.66",
+  "python-dotenv>=1.0"
+]
+
+[project.optional-dependencies]
+dev = [
+  "pytest>=8",
+  "ruff>=0.6",
+  "black>=24.8"
+]
+
+[tool.setuptools]
+package-dir = {"" = "src"}
+
+[tool.setuptools.packages.find]
+where = ["src"]
+include = ["n3*"]
+
+# n3/data 配下のCSV・JSONなどを一緒にインストールしたい場合
+[tool.setuptools.package-data]
+"n3" = ["data/**/*", "py.typed"]
+
+# （任意）コマンド名を作りたい場合はここに追記
+# 既存コードのエントリポイントが安定したら有効化してください
+# [project.scripts]
+# n3-refresh = "n3.cli.refresh_all:main"
+# n3-predict-next = "n3.prediction.predict_next_joint:main"

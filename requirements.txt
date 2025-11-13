@@ -2,5 +2,6 @@
 pandas
 numpy
 altair
+beautifulsoup4==4.12.3
 requests==2.32.3
 lxml==5.2.1

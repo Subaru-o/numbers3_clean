@@ -2,17 +2,6 @@
 # （ミニマル＋候補_3桁過去補完＋EV/回号フォールバック＋抽せん日補正
 #   ＋キャッシュ修正＋依存プレチェック＋Panicモード）
 
-from __future__ import annotations
-import os, sys, subprocess, importlib.util, traceback
-from pathlib import Path
-from datetime import date, timedelta, datetime, timezone
-
-import numpy as np
-import pandas as pd
-import streamlit as st
-import streamlit.components.v1 as components
-import altair as alt
-
 # ==== BOOTSTRAP: show full traceback on import errors ====
 import traceback, sys
 
@@ -48,6 +37,17 @@ def _fatal_on_import(e: BaseException):
     except Exception:
         pass
     st.stop()
+
+from __future__ import annotations
+import os, sys, subprocess, importlib.util, traceback
+from pathlib import Path
+from datetime import date, timedelta, datetime, timezone
+
+import numpy as np
+import pandas as pd
+import streamlit as st
+import streamlit.components.v1 as components
+import altair as alt
 
 # ========= パス/定数 =========
 ROOT = Path(__file__).resolve().parent

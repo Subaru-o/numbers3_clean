@@ -1,6 +1,8 @@
 ﻿streamlit>=1.39
-pandas
-numpy
-altair
+pandas>=2.2
+numpy>=1.26
+altair>=5.4
 beautifulsoup4==4.12.3
 requests==2.32.3
+joblib==1.4.2
+scikit-learn==1.5.1

@@ -13,6 +13,42 @@ import streamlit as st
 import streamlit.components.v1 as components
 import altair as alt
 
+# ==== BOOTSTRAP: show full traceback on import errors ====
+import traceback, sys
+
+try:
+    import streamlit as st  # まず Streamlit だけ先に読み込む
+except Exception:
+    print(traceback.format_exc())
+    raise
+
+def _fatal_on_import(e: BaseException):
+    st.title("Numbers3 Dashboard – Import Panic")
+    st.error("起動前（import 段階）で例外が発生しました。下記トレースと環境情報を確認してください。")
+    st.code("".join(traceback.format_exception(e)), language="python")
+    import platform, subprocess
+    st.write("🧰 Python:", sys.version)
+    st.write("🖥️ Platform:", platform.platform())
+    try:
+        # 代表ライブラリのバージョンを確認
+        import numpy, pandas, altair
+        st.write("📦 numpy:", numpy.__version__)
+        st.write("📦 pandas:", pandas.__version__)
+        st.write("📦 altair:", altair.__version__)
+        # joblib / sklearn / xgboost は存在可否だけでも
+        try:
+            import joblib; st.write("📦 joblib:", joblib.__version__)
+        except Exception: st.write("📦 joblib: (not installed)")
+        try:
+            import sklearn; st.write("📦 scikit-learn:", sklearn.__version__)
+        except Exception: st.write("📦 scikit-learn: (not installed)")
+        try:
+            import xgboost; st.write("📦 xgboost:", xgboost.__version__)
+        except Exception: st.write("📦 xgboost: (not installed)")
+    except Exception:
+        pass
+    st.stop()
+
 # ========= パス/定数 =========
 ROOT = Path(__file__).resolve().parent
 SRC  = ROOT / "src"

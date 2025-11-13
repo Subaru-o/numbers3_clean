@@ -1,4 +1,4 @@
-# app.py — Numbers3 EV Dashboard（ミニマル＋候補_3桁過去補完＋EV/回号フォールバック＋抽せん日補正）
+# app.py — Numbers3 EV Dashboard（ミニマル＋候補_3桁過去補完＋EV/回号フォールバック＋抽せん日補正＋キャッシュ修正）
 from __future__ import annotations
 import os, sys, subprocess, importlib.util
 from pathlib import Path
@@ -9,7 +9,6 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import altair as alt
-
 
 # ============ パス/定数 ============
 ROOT = Path(__file__).resolve().parent
@@ -29,29 +28,24 @@ PRED_HISTORY_TMP = OUT_DIR / "prediction_history.tmp.csv"  # 安定マージ用�
 MODELS_V4       = ROOT / "artifacts" / "models_V4_XGB"
 MODELS_V5_JOINT = ROOT / "artifacts" / "models_V5_joint"
 
-# === Cloud/Secrets ベースの環境値（任意・あれば使う） ===
-DEFAULT_PRICE  = int(st.secrets.get("N3_PRICE",  200))
-DEFAULT_PAYOUT = int(st.secrets.get("N3_PAYOUT", 90000))
+# --- secrets 安全取得ヘルパ
+def _secret(key: str, default=None):
+    try:
+        return st.secrets[key]
+    except Exception:
+        return os.environ.get(key, default)
+
+DEFAULT_PRICE  = int(_secret("N3_PRICE",  200))
+DEFAULT_PAYOUT = int(_secret("N3_PAYOUT", 90000))
 
 PREDICT_MOD = "n3.prediction.predict_next_joint"
 
 JST = timezone(timedelta(hours=9))
-IS_CLOUD = bool(os.environ.get("STREAMLIT_RUNTIME", ""))
 
 st.set_page_config(page_title="Numbers3 EV Dashboard（ミニマル）", layout="wide")
 
 
 # ============ ユーティリティ ============
-def _tail(txt: str, max_chars: int = 60_000) -> str:
-    """長大ログでUIが重くなるのを緩和（末尾のみ表示）"""
-    if txt is None:
-        return ""
-    if len(txt) <= max_chars:
-        return txt
-    head = "[...log truncated...]\n"
-    return head + txt[-max_chars:]
-
-
 def fmt3(v: object) -> str:
     s = str(v).strip()
     if s in ("", "None", "nan", "<NA>"):
@@ -60,7 +54,6 @@ def fmt3(v: object) -> str:
         return f"{int(float(s))%1000:03d}"
     except Exception:
         return ""
-
 
 def ensure_joint_prob(df: pd.DataFrame) -> pd.DataFrame:
     if df is None or df.empty:
@@ -80,12 +73,10 @@ def ensure_joint_prob(df: pd.DataFrame) -> pd.DataFrame:
     df["joint_prob"] = p.fillna(0.0).clip(0,1)
     return df
 
-
 def _env_with_src() -> dict:
     env = os.environ.copy()
     env["PYTHONPATH"] = str(SRC) + os.pathsep + env.get("PYTHONPATH","")
     return env
-
 
 def module_available(modname: str) -> bool:
     try:
@@ -93,46 +84,39 @@ def module_available(modname: str) -> bool:
     except Exception:
         return False
 
-
 def run(cmd: list[str], cwd: Path = ROOT) -> tuple[int, str]:
     try:
         p = subprocess.run(
             cmd, cwd=str(cwd), text=True, capture_output=True, shell=False, env=_env_with_src()
-            # , timeout=300  # 必要ならタイムアウトも設定可
         )
         return p.returncode, (p.stdout or "") + (p.stderr or "")
     except Exception as e:
         return 1, f"[runner-error] {e}"
 
-
 def run_py_module(module: str, args: list[str]) -> tuple[int, str]:
     return run([sys.executable, "-m", module, *args])
-
 
 def run_py_script(path: Path, args: list[str]) -> tuple[int, str]:
     return run([sys.executable, str(path), *args])
 
-
-@st.cache_data(ttl=1800)  # 30分キャッシュ
 def read_csv_safe(p: Path) -> pd.DataFrame | None:
-    if not p or not p.exists():
+    if not p.exists():
         return None
     try:
         return pd.read_csv(p, encoding="utf-8-sig")
     except Exception:
         return None
 
-
+# --- 重要：キャッシュ無効化のため data/raw の mtime を引数に入れる
 @st.cache_data(ttl=1800)
-def find_latest_history() -> Path | None:
+def find_latest_history(_dir_mtime: float | None = None) -> Path | None:
     if not DATA_RAW.exists():
         return None
     cands = list(DATA_RAW.glob("*_Numbers3features.csv"))
     if not cands:
         return None
-    # mtime が同一の場合もあるのでファイル名降順も併用
+    # mtime優先、同率なら名前で決め打ち
     return max(cands, key=lambda x: (x.stat().st_mtime, x.name))
-
 
 def _make_date_key(df: pd.DataFrame, col: str = "抽せん日") -> pd.DataFrame:
     if col not in df.columns:
@@ -141,14 +125,12 @@ def _make_date_key(df: pd.DataFrame, col: str = "抽せん日") -> pd.DataFrame:
     df["date_key"] = df[col].dt.date
     return df
 
-
 def weekday_ja(d: date) -> str:
     JA = ["月曜日","火曜日","水曜日","木曜日","金曜日","土曜日","日曜日"]
     return JA[d.weekday()]
 
-
 def winner3_from_raw() -> pd.DataFrame | None:
-    p = find_latest_history()
+    p = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
     if p is None: return None
     try:
         raw = pd.read_csv(
@@ -171,8 +153,8 @@ def winner3_from_raw() -> pd.DataFrame | None:
             raw["当選番号3"] = (
                 h.fillna(-1).astype(int).astype(str) +
                 t.fillna(-1).astype(int).astype(str) +
-                o.fillna(-1).astype(int).astype(str)
-            ).apply(fmt3)
+                o.fillna(-1).astype(int).astype(str
+            )).apply(fmt3)
         return raw[["抽せん日","当選番号3"]].dropna(subset=["当選番号3"]).copy()
     except Exception:
         return None
@@ -182,13 +164,13 @@ def winner3_from_raw() -> pd.DataFrame | None:
 def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame | None:
     """
     history から 1口あたりの払戻（実績）を日付単位で返す。
-    方針：`ストレート_金額` は 1口あたり固定としてそのまま採用。
+    方針：`ストレート_金額` は **1口あたりの固定金額** としてそのまま採用する。
     - 口数による割戻しは一切しない
     - 10,000〜300,000 の範囲に正規化（異常値は NaN として落とす）
     - 同日重複は最後のレコードを優先
     返す列: date_key, 回号, 払戻_実績
     """
-    hist_path = find_latest_history()
+    hist_path = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
     if hist_path is None:
         return None
     try:
@@ -200,7 +182,6 @@ def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame |
         raw = raw[raw["抽せん日"].notna()].copy()
         raw["date_key"] = raw["抽せん日"].dt.date
 
-        # カラム存在チェック
         if kind not in raw.columns:
             alt_names = ["ストレート", "ストレート_1口", "ストレート(1口)", "ストレート_1口あたり"]
             use_col = next((c for c in alt_names if c in raw.columns), None)
@@ -210,7 +191,6 @@ def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame |
         else:
             use_col = kind
 
-        # 数値化＆範囲ガード（1万〜30万）
         per_unit = pd.to_numeric(raw[use_col], errors="coerce")
         valid = (per_unit >= 10000) & (per_unit <= 300000)
         per_unit = per_unit.where(valid, np.nan)
@@ -218,7 +198,6 @@ def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame |
         df = raw[["date_key", "回号"]].copy()
         df["払戻_実績"] = per_unit
 
-        # 同日重複は最新を採用
         df = df.sort_values("date_key").drop_duplicates("date_key", keep="last")
 
         st.caption("📄 使用しているhistoryファイル: " + str(hist_path))
@@ -262,7 +241,6 @@ def persist_today_pick(pick_date: date, pick_num3: str,
         if prob is not None:   df.loc[mask, "joint_prob_pick"] = float(prob)
     df.to_csv(PRED_HISTORY, index=False, encoding="utf-8-sig")
 
-
 def _stable_merge_history(new_hist: pd.DataFrame) -> pd.DataFrame:
     base = read_csv_safe(PRED_HISTORY)
     if base is None or base.empty:
@@ -280,7 +258,6 @@ def _stable_merge_history(new_hist: pd.DataFrame) -> pd.DataFrame:
         merged = merged.sort_values("抽せん日", ascending=False)
     return merged
 
-
 def _write_stable_history_from_tmp(tmp_path: Path) -> None:
     tmp_df = read_csv_safe(tmp_path)
     if tmp_df is None or tmp_df.empty:
@@ -289,12 +266,10 @@ def _write_stable_history_from_tmp(tmp_path: Path) -> None:
     OUT_DIR.mkdir(parents=True, exist_ok=True)
     merged.to_csv(PRED_HISTORY, index=False, encoding="utf-8-sig")
 
-
 def safe_to3(x) -> str:
     s = pd.to_numeric(pd.Series([x]), errors="coerce")
     if s.isna().iloc[0]: return ""
     return f"{int(s.iloc[0]):03d}"
-
 
 def digit_boxes_html(three_digits: str) -> str:
     d0, d1, d2 = (list(three_digits) + ["", "", ""])[:3] if three_digits else ("", "", "")
@@ -311,7 +286,6 @@ def digit_boxes_html(three_digits: str) -> str:
               border-radius:12px;background:#fff;color:#111;font-size:28px;font-weight:800;">{d2}</div>
 </div>
 """.strip()
-
 
 def badge_html(label: str, value: str) -> str:
     return f"""
@@ -331,7 +305,6 @@ def _next_weekday(d: date) -> date:
         d += timedelta(days=1)
     return d
 
-
 def compute_target_draw_date(hist_last_date_str: str) -> str:
     last_d = datetime.strptime(hist_last_date_str, "%Y-%m-%d").date()
     base = _next_weekday(last_d + timedelta(days=1))
@@ -343,9 +316,8 @@ def compute_target_draw_date(hist_last_date_str: str) -> str:
         target = _next_weekday(target + timedelta(days=1))
     return target.isoformat()
 
-
 def next_draw_from_history() -> date | None:
-    hist = find_latest_history()
+    hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
     if hist is None: return None
     try:
         df = pd.read_csv(hist, encoding="utf-8-sig")
@@ -358,9 +330,8 @@ def next_draw_from_history() -> date | None:
     except Exception:
         return None
 
-
 def next_index_from_history() -> str:
-    hist = find_latest_history()
+    hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
     if hist is None: return "—"
     try:
         df = pd.read_csv(hist, encoding="utf-8-sig", usecols=lambda c: c in ["抽せん日","回号"])
@@ -377,7 +348,6 @@ def next_index_from_history() -> str:
         return "—" if m.empty else f"{int(m.max()) + 1}"
     except Exception:
         return "—"
-
 
 # ---- 候補_3桁の強制補完
 def _ensure_cand3_cols(df: pd.DataFrame) -> pd.DataFrame:
@@ -401,7 +371,6 @@ def _ensure_cand3_cols(df: pd.DataFrame) -> pd.DataFrame:
     d["候補_3桁_pick"] = d["候補_3桁_pick"].apply(fmt3).astype(str).replace("nan","")
     return d
 
-
 def _build_daily_rep_from_history() -> pd.DataFrame | None:
     hist = read_csv_safe(PRED_HISTORY)
     if hist is None or hist.empty: return None
@@ -423,39 +392,6 @@ def _build_daily_rep_from_history() -> pd.DataFrame | None:
     return rep
 
 
-# ============ 外部モデルの任意取得（Secrets: AZ_BLOB_URL_MODELS） ============
-@st.cache_resource(show_spinner="モデルを読み込んでいます…", ttl=24*3600)
-def _download_joint_model_to_cache() -> Path | None:
-    url = st.secrets.get("AZ_BLOB_URL_MODELS")
-    if not url:
-        return None  # Secrets 未設定 → ローカルのモデルを使う
-    try:
-        import requests
-        cache_dir = ROOT / ".cache" / "models"
-        cache_dir.mkdir(parents=True, exist_ok=True)
-        local_path = cache_dir / "joint_model.joblib"
-        if not local_path.exists() or local_path.stat().st_size < 10 * 1024:  # 10KB 未満なら壊れとみなす
-            with requests.get(url, stream=True, timeout=120) as r:
-                r.raise_for_status()
-                with open(local_path, "wb") as f:
-                    for chunk in r.iter_content(chunk_size=1024 * 1024):
-                        if chunk:
-                            f.write(chunk)
-        return local_path
-    except Exception as e:
-        st.warning(f"外部モデル取得に失敗しました（Secrets AZ_BLOB_URL_MODELS）。ローカルを使用します。detail={e}")
-        return None
-
-
-def resolve_models_v5_joint_path() -> Path:
-    # 1) 外部DLが成功していればそれを使う（単一joblib想定で predict 側が対応している場合）
-    dl = _download_joint_model_to_cache()
-    if dl and dl.exists():
-        return dl
-    # 2) 従来の models ディレクトリを使う
-    return MODELS_V5_JOINT
-
-
 # ============ サイドバー（シンプル） ============
 st.sidebar.header("⚡ クイック操作")
 do_update  = st.sidebar.button("データ更新（scrape_update）", use_container_width=True)
@@ -473,12 +409,23 @@ with st.sidebar.expander("⚙ 設定（基本）", expanded=True):
     with c2: payout = st.number_input("払戻（固定モード）", 10000, 200000, DEFAULT_PAYOUT, 5000)
 
 with st.sidebar.expander("🧪 デバッグ", expanded=False):
-    hist_path = find_latest_history()
-    if hist_path:
-        st.write("使用中 history:", str(hist_path))
-    else:
-        st.error("history が見つかりません。data/raw を確認してください。")
+    # data/raw の中身を見える化
+    try:
+        st.write("DATA_RAW:", str(DATA_RAW))
+        if DATA_RAW.exists():
+            files = sorted(DATA_RAW.glob("*"), key=lambda p: p.stat().st_mtime, reverse=True)
+            for p in files[:20]:
+                st.write(p.name, "-", f"{p.stat().st_size:,}", "bytes")
+        else:
+            st.write("(data/raw がありません)")
+    except Exception as e:
+        st.write(f"(list error: {e})")
 
+with st.sidebar.expander("🧹 キャッシュ", expanded=False):
+    if st.button("Cache クリア & 再実行", use_container_width=True):
+        st.cache_data.clear()
+        st.cache_resource.clear()
+        st.rerun()
 
 with st.sidebar.expander("🛠 高度な操作（学習/バックフィル）", expanded=False):
     do_train = st.button("学習（V4）", use_container_width=True, key="train")
@@ -499,7 +446,6 @@ def find_update_script() -> Path | None:
         if p.exists(): return p
     return None
 
-
 def find_train_v4_script() -> Path | None:
     for p in [
         SRC / "n3" / "training" / "train_evaluate_v4.py",
@@ -509,7 +455,6 @@ def find_train_v4_script() -> Path | None:
     ]:
         if p.exists(): return p
     return None
-
 
 def find_backfill_script() -> Path | None:
     for p in [
@@ -521,25 +466,32 @@ def find_backfill_script() -> Path | None:
         if p.exists(): return p
     return None
 
-
 if do_update:
     with st.status("データ更新中...", expanded=True) as s:
         if module_available("n3.scrape_update"):
             rc, out = run_py_module("n3.scrape_update", [])
-            st.code(_tail(out), language="bash")
-            s.update(label=("データ更新 完了 ✅" if rc == 0 else "データ更新 失敗 ❌"),
-                     state=("complete" if rc == 0 else "error"))
+            st.code(out, language="bash")
+            ok = (rc == 0)
+            s.update(label=("データ更新 完了 ✅" if ok else "データ更新 失敗 ❌"),
+                     state=("complete" if ok else "error"))
         else:
             script = find_update_script()
             if script is None:
                 s.update(label="データ更新 失敗 ❌", state="error")
                 st.error("データ更新スクリプトが見つかりません。")
+                ok = False
             else:
                 rc, out = run_py_script(script, [])
-                st.code(_tail(f"[INFO] use: {script}\n\n{out}"), language="bash")
-                s.update(label=("データ更新 完了 ✅" if rc == 0 else "データ更新 失敗 ❌"),
-                         state=("complete" if rc == 0 else "error"))
+                st.code(f"[INFO] use: {script}\n\n{out}", language="bash")
+                ok = (rc == 0)
+                s.update(label=("データ更新 完了 ✅" if ok else "データ更新 失敗 ❌"),
+                         state=("complete" if ok else "error"))
 
+        # ★ キャッシュを即クリアして history を拾い直す
+        if ok:
+            st.cache_data.clear()
+            st.success("データ更新のキャッシュをクリアしました。")
+            st.rerun()
 
 if do_refresh:
     with st.status("最新化を実行中...", expanded=True) as s:
@@ -548,7 +500,7 @@ if do_refresh:
                 try: pth.unlink()
                 except Exception: pass
         rc1 = rc2 = 1; out1 = out2 = ""
-        hist = find_latest_history()
+        hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
         if hist is None:
             s.update(label="最新化 失敗 ❌", state="error")
             st.error("[ERROR] data/raw に *_Numbers3features.csv が見つかりません。先に『データ更新』を実行してください。")
@@ -567,9 +519,8 @@ if do_refresh:
                 target_str = None
 
             # 1) 予測
-            models_arg = str(resolve_models_v5_joint_path())
             rc1, out1 = run_py_module(PREDICT_MOD, [
-                "--models_dir", models_arg,
+                "--models_dir", str(MODELS_V5_JOINT),
                 "--history",    str(hist),
                 "--out",        str(NEXT_CSV),
                 "--hist_out",   str(PRED_HISTORY_TMP),
@@ -577,7 +528,7 @@ if do_refresh:
                 "--payout",     str(int(payout)),
                 "--topn",       "1000",
             ])
-            st.code(_tail(out1) or "(no output)", language="bash")
+            st.code(out1 or "(no output)", language="bash")
 
             # TMP 履歴の抽せん日補正 → 安定マージ
             if rc1 == 0 and PRED_HISTORY_TMP.exists():
@@ -648,7 +599,7 @@ if do_refresh:
 # 学習・バックフィル
 if 'do_train' in locals() and do_train:
     with st.status("学習中...", expanded=True) as s:
-        hist = find_latest_history()
+        hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
         if hist is None:
             s.update(label="学習 失敗 ❌", state="error")
             st.error("[ERR] data/raw の *_Numbers3features.csv が見つかりません。")
@@ -659,7 +610,7 @@ if 'do_train' in locals() and do_train:
                     "--valid_ratio","0.10","--test_ratio","0.20"]
             if module_available(module_name):
                 rc, out = run_py_module(module_name, args)
-                st.code(_tail(f"[INFO] history: {hist}\n\n{out}"), language="bash")
+                st.code(f"[INFO] history: {hist}\n\n{out}", language="bash")
                 s.update(label=("学習 完了 ✅" if rc == 0 else "学習 失敗 ❌"),
                          state=("complete" if rc == 0 else "error"))
             else:
@@ -668,14 +619,13 @@ if 'do_train' in locals() and do_train:
                     s.update(label="学習 失敗 ❌", state="error"); st.error("train_evaluate_v4 が見つかりません。")
                 else:
                     rc, out = run_py_script(script, args)
-                    st.code(_tail(f"[INFO] use script: {script}\n[INFO] history: {hist}\n\n{out}"), language="bash")
+                    st.code(f"[INFO] use script: {script}\n[INFO] history: {hist}\n\n{out}", language="bash")
                     s.update(label=("学習 完了 ✅" if rc == 0 else "学習 失敗 ❌"),
                              state=("complete" if rc == 0 else "error"))
 
-
 if 'do_backfill_hist' in locals() and do_backfill_hist:
     with st.status("予測履歴のバックフィル中...", expanded=True) as s:
-        hist = find_latest_history()
+        hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
         if hist is None:
             s.update(label="バックフィル 失敗 ❌", state="error")
             st.error("history CSV が見つかりません。先に『データ更新』を実行してください。")
@@ -692,7 +642,7 @@ if 'do_backfill_hist' in locals() and do_backfill_hist:
                     "--price", str(int(price)),
                     "--payout", str(int(payout)),
                 ])
-                st.code(_tail(out), language="bash")
+                st.code(out, language="bash")
                 if rc == 0: _write_stable_history_from_tmp(PRED_HISTORY_TMP)
                 s.update(label=("バックフィル 完了 ✅" if rc == 0 else "バックフィル 失敗 ❌"),
                          state=("complete" if rc == 0 else "error"))
@@ -711,11 +661,10 @@ if 'do_backfill_hist' in locals() and do_backfill_hist:
                         "--price", str(int(price)),
                         "--payout", str(int(payout)),
                     ])
-                    st.code(_tail(f"[INFO] use script: {script}\n\n{out}"), language="bash")
+                    st.code(f"[INFO] use script: {script}\n\n{out}", language="bash")
                     if rc == 0: _write_stable_history_from_tmp(PRED_HISTORY_TMP)
                     s.update(label=("バックフィル 完了 ✅" if rc == 0 else "バックフィル 失敗 ❌"),
                              state=("complete" if rc == 0 else "error"))
-
 
 if 'do_backfill_ev' in locals() and do_backfill_ev:
     with st.status("EVバックフィル中...", expanded=True) as s:
@@ -756,19 +705,6 @@ if 'do_backfill_ev' in locals() and do_backfill_ev:
 # ============ 画面ヘッダ ============
 st.title("Numbers3 Dashboard")
 st.caption("データ更新 → 予測（EV生成）に特化。確率は常にモデル由来（joint_prob）。")
-
-# 簡易ステータス（任意）
-with st.expander("🩺 現在の状態（サマリ）", expanded=False):
-    hist_p = find_latest_history()
-    st.write("history:", str(hist_p) if hist_p else "—")
-    st.write("EV_CSV:", str(EV_CSV), " / exists=", EV_CSV.exists())
-    st.write("PRED_HISTORY:", str(PRED_HISTORY), " / exists=", Path(PRED_HISTORY).exists())
-    try:
-        if EV_CSV.exists():
-            ev_rows = sum(1 for _ in open(EV_CSV, "r", encoding="utf-8-sig")) - 1
-            st.write("EV 行数:", max(ev_rows, 0))
-    except Exception:
-        pass
 
 d = next_draw_from_history()
 draw_str = d.strftime("%Y年%m月%d日") if d else "—"
@@ -923,11 +859,9 @@ def _reduce_to_one_pick_for_eval(df: pd.DataFrame) -> pd.DataFrame:
               ない日      → EV_net 最大（なければ joint_prob 最大）
     """
     d = df.copy()
-    # 日付キー
     date_col = next((c for c in ["抽せん日","date","draw_date"] if c in d.columns), None)
     d["date_key"] = pd.to_datetime(d[date_col], errors="coerce").dt.date
 
-    # 文字列整形
     if "候補_3桁" not in d.columns: d["候補_3桁"] = ""
     d["候補_3桁"] = d["候補_3桁"].fillna("").astype(str).apply(fmt3)
     if "候補_3桁_pick" not in d.columns: d["候補_3桁_pick"] = ""
@@ -937,7 +871,6 @@ def _reduce_to_one_pick_for_eval(df: pd.DataFrame) -> pd.DataFrame:
     d["__ev"] = pd.to_numeric(d.get("EV_net"), errors="coerce")
     d["__p"]  = pd.to_numeric(d.get("joint_prob"), errors="coerce").fillna(0.0)
 
-    # pick一致を最優先、その次に EV, さらに prob
     d["_rank"] = np.where(d["_has_pick"] & (d["候補_3桁"] == d["候補_3桁_pick"]), 0, 1)
     d = d.sort_values(["date_key", "_rank", "__ev", "__p"], ascending=[True, True, False, False])
     d1 = d.drop_duplicates(subset=["date_key"], keep="first").copy()
@@ -1003,7 +936,6 @@ else:
                 df_win["date_key"] = df_win[date_col].dt.date
                 df_win = df_win.merge(paymap, on="date_key", how="left")
                 payout_series = pd.to_numeric(df_win.get("払戻_実績"), errors="coerce")
-                # ==== 1万〜30万でガード ====
                 payout_series = payout_series.where(
                     (payout_series >= 10000) & (payout_series <= 300000),
                     np.nan
@@ -1014,7 +946,6 @@ else:
         else:
             payout_series = pd.Series(float(payout), index=df_win.index)
 
-        # 念のため最終クリップ
         payout_series = pd.to_numeric(payout_series, errors="coerce").fillna(float(payout)).clip(10000, 300000)
 
         df_win["日付"] = df_win[date_col].dt.date
@@ -1042,7 +973,6 @@ else:
             st.markdown("**予測確率のキャリブレーション（10ビン）**")
             svals = pd.to_numeric(df_win["joint_prob"], errors="coerce").fillna(0.0).clip(0, 1)
 
-            # 等幅ビン
             bins = np.linspace(0.0, 1.0, 11)
             labels = [f"{int(a*100)}〜{int(b*100)}%" for a,b in zip(bins[:-1], bins[1:])]
             df_cal = pd.DataFrame({"p": svals, "hit": df_win["hit"].astype(bool)})
@@ -1137,7 +1067,7 @@ else:
 
     # 当選番号＆回号
     def _load_answer_index_map() -> pd.DataFrame | None:
-        p = find_latest_history()
+        p = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
         if p is None:
             return None
         try:
@@ -1200,7 +1130,6 @@ else:
     dfh["候補_3桁_view"] = dfh["候補_3桁_view"].fillna("").apply(fmt3)
     dfh["的中"] = (dfh["候補_3桁_view"] != "") & (dfh["候補_3桁_view"] == dfh["当選番号3"])
 
-    # EV 表示フォールバック
     dfh["joint_prob"] = pd.to_numeric(dfh.get("joint_prob"), errors="coerce").fillna(0.0)
     dfh["EV_net"] = pd.to_numeric(dfh.get("EV_net"), errors="coerce")
     dfh["EV_net_view"] = dfh["EV_net"]
@@ -1219,7 +1148,6 @@ else:
                     dfh = _make_date_key(dfh, "抽せん日")
                 dfh = dfh.merge(paymap[["date_key","払戻_実績"]], on="date_key", how="left")
                 pays = pd.to_numeric(dfh.get("払戻_実績"), errors="coerce")
-                # 1万〜30万でガード
                 pays = pays.where((pays >= 10000) & (pays <= 300000), np.nan).fillna(float(payout))
             else:
                 pays = pd.Series(float(payout), index=dfh.index)

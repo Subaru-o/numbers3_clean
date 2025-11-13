@@ -153,8 +153,8 @@ def winner3_from_raw() -> pd.DataFrame | None:
             raw["当選番号3"] = (
                 h.fillna(-1).astype(int).astype(str) +
                 t.fillna(-1).astype(int).astype(str) +
-                o.fillna(-1).astype(int).astype(str
-            )).apply(fmt3)
+                o.fillna(-1).astype(int).astype(str)
+            ).apply(fmt3)
         return raw[["抽せん日","当選番号3"]].dropna(subset=["当選番号3"]).copy()
     except Exception:
         return None

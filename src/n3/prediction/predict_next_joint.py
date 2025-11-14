@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse, json
 from pathlib import Path
 from datetime import date, timedelta, datetime
+
 import joblib, numpy as np, pandas as pd
 
 from n3.features.features_safe import build_safe_features
@@ -35,15 +36,28 @@ def _now_iso() -> str:
     except Exception:
         return str(datetime.now())
 
+
+# ========= モデル ローダ（後方互換・強化版） =========
 def _load_joint(models_dir: Path):
+    """
+    後方互換ローダー:
+      必須: joint_model.joblib（or model.joblib）
+      任意: feature_names.json / classes_1000.json / label_encoder.joblib
+            meta.json / model_meta.json / window.json
+    - feature_names.json が無ければ model.feature_names_in_ や xgboost booster から推定
+    - classes が無ければ label_encoder.joblib から復元。ダメなら '000'..'999'
+    """
+    p = Path(models_dir)
+
+    # ---- モデル本体
     payload = None
-    for name in ["joint_model.joblib", "model.joblib"]:
-        p = models_dir / name
-        if p.exists():
-            payload = joblib.load(p)
+    for name in ("joint_model.joblib", "model.joblib"):
+        q = p / name
+        if q.exists():
+            payload = joblib.load(q)
             break
     if payload is None:
-        raise FileNotFoundError(f"joint model not found in: {models_dir}")
+        raise FileNotFoundError(f"joint model not found in: {p}")
 
     if isinstance(payload, dict):
         model = payload.get("model")
@@ -51,41 +65,117 @@ def _load_joint(models_dir: Path):
     else:
         model = payload
         meta = {}
-        meta_path = models_dir / "model_meta.json"
-        if meta_path.exists():
-            try:
-                meta = json.loads(meta_path.read_text(encoding="utf-8"))
-            except Exception:
-                meta = {}
-
+        for meta_name in ("meta.json", "model_meta.json"):
+            mp = p / meta_name
+            if mp.exists():
+                try:
+                    meta = json.loads(mp.read_text(encoding="utf-8"))
+                except Exception:
+                    meta = {}
+                break
     if model is None:
         raise RuntimeError("failed to load joint model")
 
-    feat_cols = meta.get("feature_names") or meta.get("features") or []
-    window = int(meta.get("window", 200))
-
-    classes = getattr(model, "classes_", None)
-    if classes is None and (models_dir / "label_encoder.joblib").exists():
+    # ---- feature names
+    feat_cols: list[str] = []
+    fn_json = p / "feature_names.json"
+    if fn_json.exists():
         try:
-            classes = joblib.load(models_dir / "label_encoder.joblib").classes_
+            feat_cols = list(json.loads(fn_json.read_text(encoding="utf-8")))
+        except Exception:
+            feat_cols = []
+    if not feat_cols:
+        # scikit-learn
+        if hasattr(model, "feature_names_in_"):
+            try:
+                feat_cols = [str(c) for c in model.feature_names_in_]
+            except Exception:
+                feat_cols = []
+    if not feat_cols and hasattr(model, "get_booster"):
+        # xgboost classifier wrapped
+        try:
+            booster = model.get_booster()
+            if booster is not None and booster.feature_names:
+                feat_cols = list(booster.feature_names)
+        except Exception:
+            pass
+    # meta にもあれば併合（重複除去で順序維持）
+    meta_feats = meta.get("feature_names") or meta.get("features") or []
+    if meta_feats:
+        feat_cols = list(dict.fromkeys(list(feat_cols) + list(meta_feats)))
+
+    # ---- classes
+    classes = None
+    cjson = p / "classes_1000.json"
+    if cjson.exists():
+        try:
+            classes = list(json.loads(cjson.read_text(encoding="utf-8")))
         except Exception:
             classes = None
+    if classes is None:
+        le_path = p / "label_encoder.joblib"
+        if le_path.exists():
+            try:
+                le = joblib.load(le_path)
+                if hasattr(le, "classes_"):
+                    classes = le.classes_.tolist()
+            except Exception:
+                classes = None
+    if classes is None:
+        classes = [f"{i:03d}" for i in range(1000)]
+
+    # ---- window / meta
+    window = meta.get("window", None)
+    if window is None:
+        wjson = p / "window.json"
+        if wjson.exists():
+            try:
+                window = json.loads(wjson.read_text(encoding="utf-8"))
+            except Exception:
+                window = None
+    try:
+        window = int(window) if window is not None else 200
+    except Exception:
+        window = 200
 
     uniq = len(np.unique(classes)) if classes is not None else None
     print(f"[DIAG] classes_ size = {uniq}")
     return model, feat_cols, classes, window, meta
 
 
-def _ensure_columns(df: pd.DataFrame, cols: list[str]) -> pd.DataFrame:
-    d = df.copy()
-    for c in cols:
+# ========= 前処理ヘルパ =========
+def _ensure_columns_for_X(df_feat: pd.DataFrame, feat_cols: list[str]) -> tuple[pd.DataFrame, list[str]]:
+    """
+    フィーチャ列が空または不足しても動くように整える。
+    - feat_cols が空なら df_feat から“特徴量っぽい列”を自動抽出
+    - 足りない列は 0.0 で補う
+    """
+    d = df_feat.copy()
+
+    # 候補が空 → 自動抽出（日時やIDっぽい列は除外）
+    if not feat_cols:
+        drop_like = {"抽せん日", "date", "draw_date", "date_key", "回号"}
+        num_cols = [c for c in d.columns if c not in drop_like]
+        # 数値系に限定
+        feat_cols = [c for c in num_cols if pd.api.types.is_numeric_dtype(d[c])]
+        feat_cols = list(dict.fromkeys(feat_cols))  # 順序安定
+
+    # 足りない列を0埋め
+    for c in feat_cols:
         if c not in d.columns:
             d[c] = 0.0
-    return d
+
+    # 数値化＆欠損処理
+    X = d[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0)
+    for c in feat_cols:
+        try:
+            X[c] = pd.to_numeric(X[c], errors="coerce").fillna(0.0).astype(float)
+        except Exception:
+            X[c] = 0.0
+    return X, feat_cols
 
 
-def _first_write_wins_append(csv_path: Path, new_rows: pd.DataFrame,
-                             key_cols: list[str]) -> None:
+def _first_write_wins_append(csv_path: Path, new_rows: pd.DataFrame, key_cols: list[str]) -> None:
     """
     既存CSVに対し、key_cols（例: 抽せん日, 候補_3桁）で未登録の行のみ追記。
     既存が優先（first-write-wins）。列は両者の和集合で揃える。
@@ -109,7 +199,7 @@ def _first_write_wins_append(csv_path: Path, new_rows: pd.DataFrame,
 
         # 既存キー集合
         def _key_tuple(df_: pd.DataFrame) -> pd.Series:
-            return df_.apply(lambda r: tuple(r[c] for c in key_cols), axis=1)
+            return df_.apply(lambda r: tuple(r.get(c) for c in key_cols), axis=1)
 
         existing = set(_key_tuple(old2))
         add_mask = ~_key_tuple(new2).isin(existing)
@@ -159,7 +249,7 @@ def main() -> int:
     last_day: date = df_feat["date_key"].max()
     target_day: date = _next_business_day(last_day)  # ← 来日（次営業日）に設定
 
-    # 最新日の最初の行をベースに予測（※ historyの「将来行」は作らない）
+    # 最新日の最初の行をベースに予測
     latest_row = (
         df_feat[df_feat["date_key"] == last_day]
         .sort_values("抽せん日")
@@ -167,8 +257,8 @@ def main() -> int:
         .iloc[0]
     )
 
-    # --- フィーチャ行列
-    df_feat = _ensure_columns(df_feat, feat_cols)
+    # --- フィーチャ行列（列自動補完つき）
+    X_all, feat_cols = _ensure_columns_for_X(df_feat, feat_cols)
     X = pd.DataFrame([latest_row])[feat_cols].replace([np.inf, -np.inf], np.nan).fillna(0.0).astype(float)
 
     # --- 予測確率
@@ -247,13 +337,11 @@ def main() -> int:
     # --- 直接履歴に追記（任意：指定時のみ）
     if args.append_history:
         append_path = Path(args.append_history)
-        # first-write-wins: (抽せん日, 候補_3桁) が鍵
         _first_write_wins_append(append_path, df_topn, key_cols=["抽せん日", "候補_3桁"])
         print(f"[OK] appended to history (first-write-wins): {append_path}")
 
     # --- コンソール
     print("[TOPN]")
-    # 表示列の順序を軽く整える
     show_cols = ["抽せん日", "候補_3桁", "予測番号", "百", "十", "一",
                  "joint_prob", "EV_gross", "EV_net", "price", "expected_payout",
                  "model_name", "feature_set", "gen_at"]

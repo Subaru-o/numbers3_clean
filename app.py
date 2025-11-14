@@ -1,6 +1,6 @@
-# app.py — Numbers3 EV Dashboard（モデルZIP自動取得対応版：方法A / 2025-11-14）
+# app.py — Numbers3 EV Dashboard（ミニマル＋候補_3桁過去補完＋EV/回号フォールバック＋抽せん日補正＋キャッシュ修正＋型/警告対応）
 from __future__ import annotations
-import os, sys, subprocess, importlib.util, io, zipfile, shutil
+import os, sys, subprocess, importlib.util
 from pathlib import Path
 from datetime import date, timedelta, datetime, timezone
 
@@ -9,7 +9,6 @@ import pandas as pd
 import streamlit as st
 import streamlit.components.v1 as components
 import altair as alt
-import requests  # ← ZIP直リンク取得用
 
 # ============ パス/定数 ============
 ROOT = Path(__file__).resolve().parent
@@ -27,12 +26,7 @@ PRED_HISTORY  = OUT_DIR / "prediction_history.csv"
 PRED_HISTORY_TMP = OUT_DIR / "prediction_history.tmp.csv"  # 安定マージ用一時
 
 MODELS_V4       = ROOT / "artifacts" / "models_V4_XGB"
-MODELS_V5_JOINT = ROOT / "artifacts" / "models_V5_joint"   # ★ここに展開される
-
-PREDICT_MOD = "n3.prediction.predict_next_joint"
-JST = timezone(timedelta(hours=9))
-
-st.set_page_config(page_title="Numbers3 EV Dashboard（ミニマル）", layout="wide")
+MODELS_V5_JOINT = ROOT / "artifacts" / "models_V5_joint"
 
 # --- secrets 安全取得ヘルパ
 def _secret(key: str, default=None):
@@ -41,75 +35,15 @@ def _secret(key: str, default=None):
     except Exception:
         return os.environ.get(key, default)
 
-DEFAULT_PRICE  = int((_secret("N3_PRICE",  200)))
-DEFAULT_PAYOUT = int((_secret("N3_PAYOUT", 90000)))
+DEFAULT_PRICE  = int(_secret("N3_PRICE",  200))
+DEFAULT_PAYOUT = int(_secret("N3_PAYOUT", 90000))
 
-# ============ モデルZIP自動取得（方法A） ============
-def ensure_models_v5_joint() -> tuple[bool, str]:
-    """
-    artifacts/models_V5_joint/ を用意する。
-    1) 既に .joblib / classes*.json があればOK
-    2) Secrets: MODELS_V5_ZIP_URL からZIPダウンロード→展開（直リンク必須 /releases/download/）
-    3) 一段ネストでも吸い上げて MODELS_V5_JOINT に揃える
-    """
-    dst = MODELS_V5_JOINT
-    dst.mkdir(parents=True, exist_ok=True)
+PREDICT_MOD = "n3.prediction.predict_next_joint"
 
-    existed = list(dst.glob("**/*.joblib")) + list(dst.glob("**/classes*.json"))
-    if existed:
-        return True, f"[models] use existing: {dst}"
+JST = timezone(timedelta(hours=9))
 
-    url = (_secret("MODELS_V5_ZIP_URL") or "").strip()
-    # 引用符が入ってしまっている場合のケア
-    if url.startswith(("'", '"')) and url.endswith(("'", '"')):
-        url = url[1:-1].strip()
+st.set_page_config(page_title="Numbers3 EV Dashboard（ミニマル）", layout="wide")
 
-    if not url:
-        return False, "[models] MODELS_V5_ZIP_URL is empty. Secrets未設定。"
-
-    try:
-        headers = {
-            "Accept": "application/octet-stream",
-            "User-Agent": "numbers3-streamlit-downloader"
-        }
-        with requests.get(url, headers=headers, timeout=180, stream=True, allow_redirects=True) as r:
-            if r.status_code != 200:
-                return False, f"[models] download failed HTTP {r.status_code}: {url}"
-            content = io.BytesIO(r.content)
-
-        work = dst.parent / "_tmp_models_zip"
-        if work.exists():
-            shutil.rmtree(work, ignore_errors=True)
-        work.mkdir(parents=True, exist_ok=True)
-
-        with zipfile.ZipFile(content) as zf:
-            zf.extractall(work)
-
-        # 一段ネスト吸い上げ
-        children = [p for p in work.iterdir()]
-        if len(children) == 1 and children[0].is_dir():
-            src_root = children[0]
-        else:
-            src_root = work
-
-        # 既存クリア
-        for p in dst.iterdir():
-            if p.is_file():
-                p.unlink()
-            else:
-                shutil.rmtree(p, ignore_errors=True)
-
-        # 中身を移動
-        for p in src_root.iterdir():
-            target = dst / p.name
-            shutil.move(str(p), str(target))
-
-        shutil.rmtree(work, ignore_errors=True)
-
-        ok = bool(list(dst.glob("**/*.joblib")))
-        return ok, f"[models] extracted to {dst} (ok={ok}) from={url}"
-    except Exception as e:
-        return False, f"[models] exception: {e!r}"
 
 # ============ ユーティリティ ============
 def fmt3(v: object) -> str:
@@ -122,7 +56,8 @@ def fmt3(v: object) -> str:
         return ""
 
 def ensure_joint_prob(df: pd.DataFrame) -> pd.DataFrame:
-    if df is None or df.empty: return df
+    if df is None or df.empty:
+        return df
     if all(c in df.columns for c in ["p_hundred","p_ten","p_one"]):
         p = (
             pd.to_numeric(df["p_hundred"], errors="coerce").clip(0,1) *
@@ -165,17 +100,22 @@ def run_py_script(path: Path, args: list[str]) -> tuple[int, str]:
     return run([sys.executable, str(path), *args])
 
 def read_csv_safe(p: Path) -> pd.DataFrame | None:
-    if not p.exists(): return None
+    if not p.exists():
+        return None
     try:
         return pd.read_csv(p, encoding="utf-8-sig")
     except Exception:
         return None
 
+# --- 重要：キャッシュ無効化のため data/raw の mtime を引数に入れる
 @st.cache_data(ttl=1800)
 def find_latest_history(_dir_mtime: float | None = None) -> Path | None:
-    if not DATA_RAW.exists(): return None
+    if not DATA_RAW.exists():
+        return None
     cands = list(DATA_RAW.glob("*_Numbers3features.csv"))
-    if not cands: return None
+    if not cands:
+        return None
+    # mtime優先、同率なら名前で決め打ち
     return max(cands, key=lambda x: (x.stat().st_mtime, x.name))
 
 def _make_date_key(df: pd.DataFrame, col: str = "抽せん日") -> pd.DataFrame:
@@ -219,13 +159,25 @@ def winner3_from_raw() -> pd.DataFrame | None:
     except Exception:
         return None
 
+
 # ========== 実績払戻（1口あたり）マップ ==========
 def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame | None:
+    """
+    history から 1口あたりの払戻（実績）を日付単位で返す。
+    方針：`ストレート_金額` は **1口あたりの固定金額** としてそのまま採用する。
+    - 口数による割戻しは一切しない
+    - 10,000〜300,000 の範囲に正規化（異常値は NaN として落とす）
+    - 同日重複は最後のレコードを優先
+    返す列: date_key, 回号, 払戻_実績
+    """
     hist_path = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
-    if hist_path is None: return None
+    if hist_path is None:
+        return None
     try:
         raw = pd.read_csv(hist_path, encoding="utf-8-sig")
-        if "抽せん日" not in raw.columns: return None
+        if "抽せん日" not in raw.columns:
+            return None
+
         raw["抽せん日"] = pd.to_datetime(raw["抽せん日"], errors="coerce")
         raw = raw[raw["抽せん日"].notna()].copy()
         raw["date_key"] = raw["抽せん日"].dt.date
@@ -245,10 +197,12 @@ def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame |
 
         df = raw[["date_key", "回号"]].copy()
         df["払戻_実績"] = per_unit
+
         df = df.sort_values("date_key").drop_duplicates("date_key", keep="last")
 
         st.caption("📄 使用しているhistoryファイル: " + str(hist_path))
         st.info("payouts_map_from_raw: モード='1口あたり固定（列をそのまま使用）', 列='" + use_col + f"', 行数={len(df.dropna(subset=['払戻_実績']))}")
+
         if df["払戻_実績"].notna().any():
             return df[["date_key", "回号", "払戻_実績"]].copy()
         else:
@@ -257,33 +211,55 @@ def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame |
         st.warning(f"payouts_map_from_raw で例外: {e}")
         return None
 
+
 def persist_today_pick(pick_date: date, pick_num3: str,
                        ev_adj: float | None = None,
                        prob: float | None = None) -> None:
+    """当日のTop1を prediction_history.csv に first-write-wins で保存。
+       - 列の dtype は string に統一して将来の pandas エラーを回避。
+    """
     df = read_csv_safe(PRED_HISTORY)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
+
+    # 既存がない場合の初期 DataFrame（すべて string / float 可）
     if df is None or df.empty:
-        df = pd.DataFrame(columns=["抽せん日","候補_3桁_pick","EV_net_adj_pick","joint_prob_pick"])
-        row = {"抽せん日": pd.to_datetime(pick_date),
-               "候補_3桁_pick": fmt3(pick_num3),
-               "EV_net_adj_pick": ev_adj,
-               "joint_prob_pick": prob}
-        pd.DataFrame([row]).to_csv(PRED_HISTORY, index=False, encoding="utf-8-sig")
-        return
+        df = pd.DataFrame({
+            "抽せん日": pd.Series([], dtype="datetime64[ns]"),
+            "候補_3桁_pick": pd.Series([], dtype="string"),
+            "EV_net_adj_pick": pd.Series([], dtype="float64"),
+            "joint_prob_pick": pd.Series([], dtype="float64"),
+        })
+
+    # 必須列の dtype 整備
     if "抽せん日" not in df.columns:
-        df["抽せん日"] = pd.NaT
+        df["抽せん日"] = pd.Series([], dtype="datetime64[ns]")
+    if "候補_3桁_pick" not in df.columns:
+        df["候補_3桁_pick"] = pd.Series([], dtype="string")
+    else:
+        # ← ここが今回の将来エラー対策：文字列型へ統一
+        df["候補_3桁_pick"] = df["候補_3桁_pick"].astype("string")
+
+    if "EV_net_adj_pick" not in df.columns:
+        df["EV_net_adj_pick"] = pd.Series([], dtype="float64")
+    if "joint_prob_pick" not in df.columns:
+        df["joint_prob_pick"] = pd.Series([], dtype="float64")
+
     df["抽せん日"] = pd.to_datetime(df["抽せん日"], errors="coerce")
     mask = df["抽せん日"].dt.date == pick_date
+
     if not mask.any():
-        row = {"抽せん日": pd.to_datetime(pick_date),
-               "候補_3桁_pick": fmt3(pick_num3),
-               "EV_net_adj_pick": ev_adj,
-               "joint_prob_pick": prob}
+        row = {
+            "抽せん日": pd.to_datetime(pick_date),
+            "候補_3桁_pick": str(fmt3(pick_num3)),
+            "EV_net_adj_pick": float(ev_adj) if ev_adj is not None else np.nan,
+            "joint_prob_pick": float(prob) if prob is not None else np.nan,
+        }
         df = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
     else:
-        df.loc[mask, "候補_3桁_pick"] = fmt3(pick_num3)
+        df.loc[mask, "候補_3桁_pick"] = str(fmt3(pick_num3))
         if ev_adj is not None: df.loc[mask, "EV_net_adj_pick"] = float(ev_adj)
-        if prob is not None:   df.loc[mask, "joint_prob_pick"] = float(prob)
+        if prob  is not None: df.loc[mask, "joint_prob_pick"] = float(prob)
+
     df.to_csv(PRED_HISTORY, index=False, encoding="utf-8-sig")
 
 def _stable_merge_history(new_hist: pd.DataFrame) -> pd.DataFrame:
@@ -343,6 +319,7 @@ def badge_html(label: str, value: str) -> str:
 </div>
 """.strip()
 
+
 # --- 抽せん日ターゲット（JST・土日スキップ）
 def _next_weekday(d: date) -> date:
     while d.weekday() >= 5:
@@ -379,10 +356,12 @@ def next_index_from_history() -> str:
     if hist is None: return "—"
     try:
         df = pd.read_csv(hist, encoding="utf-8-sig", usecols=lambda c: c in ["抽せん日","回号"])
-        if "回号" not in df.columns: return "—"
+        if "回号" not in df.columns:
+            return "—"
         df["抽せん日"] = pd.to_datetime(df.get("抽せん日"), errors="coerce")
         df = df[df["抽せん日"].notna()].copy()
-        if df.empty: return "—"
+        if df.empty:
+            return "—"
         dmax = df["抽せん日"].max()
         m = pd.to_numeric(df.loc[df["抽せん日"] == dmax, "回号"], errors="coerce").dropna()
         if m.empty:
@@ -409,8 +388,10 @@ def _ensure_cand3_cols(df: pd.DataFrame) -> pd.DataFrame:
             d["候補_3桁"] = ""
     d["候補_3桁"] = d["候補_3桁"].apply(fmt3).astype(str)
     if "候補_3桁_pick" not in d.columns:
-        d["候補_3桁_pick"] = ""
-    d["候補_3桁_pick"] = d["候補_3桁_pick"].apply(fmt3).astype(str).replace("nan","")
+        d["候補_3桁_pick"] = pd.Series([""]*len(d), dtype="string")
+    else:
+        d["候補_3桁_pick"] = d["候補_3桁_pick"].astype("string")
+    d["候補_3桁_pick"] = d["候補_3桁_pick"].apply(fmt3).astype("string").replace("nan","")
     return d
 
 def _build_daily_rep_from_history() -> pd.DataFrame | None:
@@ -433,10 +414,12 @@ def _build_daily_rep_from_history() -> pd.DataFrame | None:
     rep["cand3_rep"] = rep["cand3_rep"].apply(fmt3)
     return rep
 
-# ============ サイドバー ============
+
+# ============ サイドバー（シンプル） ============
 st.sidebar.header("⚡ クイック操作")
-do_update  = st.sidebar.button("データ更新（scrape_update）", use_container_width=True)
-do_refresh = st.sidebar.button("最新化（予測→EV）", use_container_width=True)
+# use_container_width は非推奨 → width="stretch" に置換
+do_update  = st.sidebar.button("データ更新（scrape_update）", width="stretch")
+do_refresh = st.sidebar.button("最新化（予測→EV）", width="stretch")
 
 with st.sidebar.expander("⚙ 設定（基本）", expanded=True):
     payout_mode = st.radio("払戻の基準", ["実績（historyの金額を使う）", "固定（下の金額）"], index=0)
@@ -458,21 +441,20 @@ with st.sidebar.expander("🧪 デバッグ", expanded=False):
                 st.write(p.name, "-", f"{p.stat().st_size:,}", "bytes")
         else:
             st.write("(data/raw がありません)")
-        st.write("MODELS_V5_JOINT:", str(MODELS_V5_JOINT))
-        st.write("ENV.MODELS_V5_ZIP_URL:", (_secret("MODELS_V5_ZIP_URL") or "(not set)"))
     except Exception as e:
-        st.write(f"(debug list error: {e})")
+        st.write(f"(list error: {e})")
 
 with st.sidebar.expander("🧹 キャッシュ", expanded=False):
-    if st.button("Cache クリア & 再実行", use_container_width=True):
+    if st.button("Cache クリア & 再実行", width="stretch"):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
 
 with st.sidebar.expander("🛠 高度な操作（学習/バックフィル）", expanded=False):
-    do_train = st.button("学習（V4）", use_container_width=True, key="train")
-    do_backfill_hist = st.button("バックフィル（予測履歴）", use_container_width=True, key="bf_hist")
-    do_backfill_ev   = st.button("バックフィル（EV）", use_container_width=True, key="bf_ev")
+    do_train = st.button("学習（V4）", width="stretch", key="train")
+    do_backfill_hist = st.button("バックフィル（予測履歴）", width="stretch", key="bf_hist")
+    do_backfill_ev   = st.button("バックフィル（EV）", width="stretch", key="bf_ev")
+
 
 # ============ アクション実装 ============
 def find_update_script() -> Path | None:
@@ -527,6 +509,8 @@ if do_update:
                 ok = (rc == 0)
                 s.update(label=("データ更新 完了 ✅" if ok else "データ更新 失敗 ❌"),
                          state=("complete" if ok else "error"))
+
+        # ★ キャッシュを即クリアして history を拾い直す
         if ok:
             st.cache_data.clear()
             st.success("データ更新のキャッシュをクリアしました。")
@@ -534,115 +518,108 @@ if do_update:
 
 if do_refresh:
     with st.status("最新化を実行中...", expanded=True) as s:
-        # ★ まずモデルを確保（ZIP自動展開）
-        ok_m, msg_m = ensure_models_v5_joint()
-        st.write(msg_m)
-        if not ok_m:
+        for pth in [NEXT_CSV, EV_CSV, PRED_HISTORY_TMP]:
+            if pth.exists():
+                try: pth.unlink()
+                except Exception: pass
+        rc1 = rc2 = 1; out1 = out2 = ""
+        hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
+        if hist is None:
             s.update(label="最新化 失敗 ❌", state="error")
-            st.error("V5 ジョイントモデルの取得に失敗しました。Secretsの MODELS_V5_ZIP_URL（/releases/download/... 直リンク）を確認してください。")
+            st.error("[ERROR] data/raw に *_Numbers3features.csv が見つかりません。先に『データ更新』を実行してください。")
         else:
-            # 前処理
-            for pth in [NEXT_CSV, EV_CSV, PRED_HISTORY_TMP]:
-                if pth.exists():
-                    try: pth.unlink()
-                    except Exception: pass
-
-            rc1 = rc2 = 1; out1 = out2 = ""
-            hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
-            if hist is None:
+            # 抽せん日ターゲット算出
+            try:
+                df_hist = pd.read_csv(hist, encoding="utf-8-sig")
+                dmax = pd.to_datetime(df_hist["抽せん日"], errors="coerce").max()
+                if pd.isna(dmax):
+                    raise RuntimeError("history の抽せん日が読み取れません。")
+                hist_last_iso = dmax.date().isoformat()
+                target_str = compute_target_draw_date(hist_last_iso)
+            except Exception as e:
                 s.update(label="最新化 失敗 ❌", state="error")
-                st.error("[ERROR] data/raw に *_Numbers3features.csv が見つかりません。先に『データ更新』を実行してください。")
-            else:
-                # 抽せん日ターゲット
+                st.error(f"[ERROR] 抽せん日ターゲット決定に失敗: {e}")
+                target_str = None
+
+            # 1) 予測
+            rc1, out1 = run_py_module(PREDICT_MOD, [
+                "--models_dir", str(MODELS_V5_JOINT),
+                "--history",    str(hist),
+                "--out",        str(NEXT_CSV),
+                "--hist_out",   str(PRED_HISTORY_TMP),
+                "--price",      str(int(price)),
+                "--payout",     str(int(payout)),
+                "--topn",       "1000",
+            ])
+            st.code(out1 or "(no output)", language="bash")
+
+            # TMP 履歴の抽せん日補正 → 安定マージ
+            if rc1 == 0 and PRED_HISTORY_TMP.exists():
                 try:
-                    df_hist = pd.read_csv(hist, encoding="utf-8-sig")
-                    dmax = pd.to_datetime(df_hist["抽せん日"], errors="coerce").max()
-                    if pd.isna(dmax):
-                        raise RuntimeError("history の抽せん日が読み取れません。")
-                    hist_last_iso = dmax.date().isoformat()
-                    target_str = compute_target_draw_date(hist_last_iso)
-                except Exception as e:
-                    s.update(label="最新化 失敗 ❌", state="error")
-                    st.error(f"[ERROR] 抽せん日ターゲット決定に失敗: {e}")
-                    target_str = None
-
-                # 1) 予測
-                rc1, out1 = run_py_module(PREDICT_MOD, [
-                    "--models_dir", str(MODELS_V5_JOINT),
-                    "--history",    str(hist),
-                    "--out",        str(NEXT_CSV),
-                    "--hist_out",   str(PRED_HISTORY_TMP),
-                    "--price",      str(int(price)),
-                    "--payout",     str(int(payout)),
-                    "--topn",       "1000",
-                ])
-                st.code(out1 or "(no output)", language="bash")
-
-                # TMP 履歴の抽せん日補正 → 安定マージ
-                if rc1 == 0 and PRED_HISTORY_TMP.exists():
-                    try:
-                        tmp = read_csv_safe(PRED_HISTORY_TMP)
-                        if tmp is not None and not tmp.empty and target_str:
-                            if "抽せん日" not in tmp.columns:
-                                tmp["抽せん日"] = target_str
-                            else:
-                                tmp["抽せん日"] = pd.to_datetime(target_str)
-                            tmp.to_csv(PRED_HISTORY_TMP, index=False, encoding="utf-8-sig")
-                    except Exception:
-                        pass
-                    _write_stable_history_from_tmp(PRED_HISTORY_TMP)
-                elif rc1 != 0:
-                    st.warning("予測段階でエラーが発生しました。ログをご確認ください。")
-
-                # 2) EV 生成（ローカル）
-                try:
-                    df_next = read_csv_safe(NEXT_CSV)
-                    if df_next is None or df_next.empty:
-                        raise RuntimeError("NEXT_CSV が空です。予測で失敗の可能性。")
-
-                    if target_str:
-                        df_next["抽せん日"] = target_str
-
-                    if "候補_3桁" not in df_next.columns:
-                        if all(c in df_next.columns for c in ["百","十","一"]):
-                            df_next["候補_3桁"] = (
-                                pd.to_numeric(df_next["百"], errors="coerce").fillna(0).astype(int).astype(str) +
-                                pd.to_numeric(df_next["十"], errors="coerce").fillna(0).astype(int).astype(str) +
-                                pd.to_numeric(df_next["一"], errors="coerce").fillna(0).astype(int).astype(str)
-                            )
-                        elif "候補番号" in df_next.columns:
-                            df_next["候補_3桁"] = pd.to_numeric(df_next["候補番号"], errors="coerce").fillna(0).astype(int).astype(str).str.zfill(3)
-                        elif "番号" in df_next.columns:
-                            df_next["候補_3桁"] = pd.to_numeric(df_next["番号"], errors="coerce").fillna(0).astype(int).astype(str).str.zfill(3)
+                    tmp = read_csv_safe(PRED_HISTORY_TMP)
+                    if tmp is not None and not tmp.empty and target_str:
+                        if "抽せん日" not in tmp.columns:
+                            tmp["抽せん日"] = target_str
                         else:
-                            df_next["候補_3桁"] = ""
-                    df_next["候補_3桁"] = df_next["候補_3桁"].map(fmt3)
+                            tmp["抽せん日"] = pd.to_datetime(tmp["抽せん日"], errors="coerce")
+                            tmp["抽せん日"] = pd.to_datetime(target_str)
+                        tmp.to_csv(PRED_HISTORY_TMP, index=False, encoding="utf-8-sig")
+                except Exception:
+                    pass
+                _write_stable_history_from_tmp(PRED_HISTORY_TMP)
+            elif rc1 != 0:
+                st.warning("予測段階でエラーが発生しました。ログをご確認ください。")
 
-                    df_next = ensure_joint_prob(df_next)
-                    jp = pd.to_numeric(df_next["joint_prob"], errors="coerce").fillna(0.0).clip(0, 1)
-                    df_next["EV_gross"] = jp * float(payout)
-                    df_next["EV_net"]   = df_next["EV_gross"] - float(price)
-                    df_next = df_next.sort_values(["EV_net","EV_gross","joint_prob"], ascending=[False,False,False]).reset_index(drop=True)
-                    OUT_DIR.mkdir(parents=True, exist_ok=True)
-                    df_next.to_csv(EV_CSV, index=False, encoding="utf-8-sig")
-                    out2 = "[OK] EV をアプリ内で計算して ev_report.csv を生成しました。"; rc2 = 0
+            # 2) EV 生成（ローカル）
+            try:
+                df_next = read_csv_safe(NEXT_CSV)
+                if df_next is None or df_next.empty:
+                    raise RuntimeError("NEXT_CSV が空です。予測で失敗の可能性。")
 
-                    try:
-                        uniq_dates = pd.to_datetime(df_next.get("抽せん日"), errors="coerce").dt.date.dropna().unique().tolist()
-                        print(f"[INFO] history last : {hist_last_iso}")
-                        print(f"[INFO] target draw  : {target_str} (JST today={datetime.now(JST).date()})")
-                        print(f"[INFO] EV_CSV 抽せん日: {uniq_dates}")
-                    except Exception:
-                        pass
+                if target_str:
+                    df_next["抽せん日"] = target_str
 
-                except Exception as e:
-                    out2 = f"[ERR] EV のローカル生成に失敗: {e}"; rc2 = 1
-                st.code(out2, language="bash")
+                if "候補_3桁" not in df_next.columns:
+                    if all(c in df_next.columns for c in ["百","十","一"]):
+                        df_next["候補_3桁"] = (
+                            pd.to_numeric(df_next["百"], errors="coerce").fillna(0).astype(int).astype(str) +
+                            pd.to_numeric(df_next["十"], errors="coerce").fillna(0).astype(int).astype(str) +
+                            pd.to_numeric(df_next["一"], errors="coerce").fillna(0).astype(int).astype(str)
+                        )
+                    elif "候補番号" in df_next.columns:
+                        df_next["候補_3桁"] = pd.to_numeric(df_next["候補番号"], errors="coerce").fillna(0).astype(int).astype(str).str.zfill(3)
+                    elif "番号" in df_next.columns:
+                        df_next["候補_3桁"] = pd.to_numeric(df_next["番号"], errors="coerce").fillna(0).astype(int).astype(str).str.zfill(3)
+                    else:
+                        df_next["候補_3桁"] = ""
+                df_next["候補_3桁"] = df_next["候補_3桁"].map(fmt3)
 
-            s.update(label=("最新化 完了 ✅" if rc1 == 0 and rc2 == 0 and EV_CSV.exists() else "最新化 失敗 ❌"),
-                     state=("complete" if rc1 == 0 and rc2 == 0 and EV_CSV.exists() else "error"))
+                df_next = ensure_joint_prob(df_next)
+                jp = pd.to_numeric(df_next["joint_prob"], errors="coerce").fillna(0.0).clip(0, 1)
+                df_next["EV_gross"] = jp * float(payout)
+                df_next["EV_net"]   = df_next["EV_gross"] - float(price)
+                df_next = df_next.sort_values(["EV_net","EV_gross","joint_prob"], ascending=[False,False,False]).reset_index(drop=True)
+                OUT_DIR.mkdir(parents=True, exist_ok=True)
+                df_next.to_csv(EV_CSV, index=False, encoding="utf-8-sig")
+                out2 = "[OK] EV をアプリ内で計算して ev_report.csv を生成しました。"; rc2 = 0
 
-# ===== 学習・バックフィル（この下は従来どおり：省略なし） =====
+                try:
+                    uniq_dates = pd.to_datetime(df_next.get("抽せん日"), errors="coerce").dt.date.dropna().unique().tolist()
+                    print(f"[INFO] history last : {hist_last_iso}")
+                    print(f"[INFO] target draw  : {target_str} (JST today={datetime.now(JST).date()})")
+                    print(f"[INFO] EV_CSV 抽せん日: {uniq_dates}")
+                except Exception:
+                    pass
+
+            except Exception as e:
+                out2 = f"[ERR] EV のローカル生成に失敗: {e}"; rc2 = 1
+            st.code(out2, language="bash")
+
+        s.update(label=("最新化 完了 ✅" if rc1 == 0 and rc2 == 0 and EV_CSV.exists() else "最新化 失敗 ❌"),
+                 state=("complete" if rc1 == 0 and rc2 == 0 and EV_CSV.exists() else "error"))
+
+
+# 学習・バックフィル
 if 'do_train' in locals() and do_train:
     with st.status("学習中...", expanded=True) as s:
         hist = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
@@ -747,6 +724,7 @@ if 'do_backfill_ev' in locals() and do_backfill_ev:
             df.to_csv(EV_BACKFILL, index=False, encoding="utf-8-sig")
             s.update(label="EVバックフィル 完了 ✅（履歴由来）", state="complete")
 
+
 # ============ 画面ヘッダ ============
 st.title("Numbers3 Dashboard")
 st.caption("データ更新 → 予測（EV生成）に特化。確率は常にモデル由来（joint_prob）。")
@@ -760,7 +738,9 @@ c1, c2, c3 = st.columns(3)
 with c1: components.html(badge_html("抽せん日", draw_str), height=70)
 with c2: components.html(badge_html("曜日",  wday_str),  height=70)
 with c3: components.html(badge_html("回号",  idx_str),   height=70)
+
 st.markdown("---")
+
 
 # ============ EVレポート読込 & 並び ============
 df_ev = read_csv_safe(EV_CSV)
@@ -787,6 +767,7 @@ if not df_ev.empty:
     sort_cols = [c for c in ["EV_net","EV_gross","joint_prob"] if c in df_ev.columns]
     df_ev = df_ev.sort_values(sort_cols, ascending=[False]*len(sort_cols)).reset_index(drop=True)
 
+
 # ============ 最新Top1 ============
 st.subheader("最新の予測（Top1）")
 if not df_ev.empty:
@@ -806,6 +787,7 @@ else:
     st.info("EVレポートが見つかりません。左の『最新化（予測→EV）』を実行してください。")
 
 st.markdown("---")
+
 
 # ============ おすすめ Top3 ============
 st.subheader("おすすめ Top3（EV順）")
@@ -867,10 +849,11 @@ if not df_ev.empty:
         df_ev.to_csv(index=False, encoding="utf-8-sig"),
         file_name="ev_report_view.csv",
         mime="text/csv",
-        use_container_width=True
+        # use_container_width は削除（新APIに幅指定なし）
     )
 
 st.markdown("---")
+
 
 # ============ 検証（成績と信頼度） ============
 st.subheader("検証（成績と信頼度）")
@@ -892,23 +875,33 @@ def _load_for_eval() -> pd.DataFrame:
     if df is None: return pd.DataFrame()
     return df.copy()
 
+# ==== PATCH A: 評価は 1日=1本 に正規化 ====
 def _reduce_to_one_pick_for_eval(df: pd.DataFrame) -> pd.DataFrame:
+    """評価用に 1日=1本 に正規化。
+    優先順位: 候補_3桁_pick がある日→その行
+              ない日      → EV_net 最大（なければ joint_prob 最大）
+    """
     d = df.copy()
     date_col = next((c for c in ["抽せん日","date","draw_date"] if c in d.columns), None)
     d["date_key"] = pd.to_datetime(d[date_col], errors="coerce").dt.date
+
     if "候補_3桁" not in d.columns: d["候補_3桁"] = ""
     d["候補_3桁"] = d["候補_3桁"].fillna("").astype(str).apply(fmt3)
     if "候補_3桁_pick" not in d.columns: d["候補_3桁_pick"] = ""
     d["候補_3桁_pick"] = d["候補_3桁_pick"].fillna("").astype(str).apply(fmt3)
+
     d["_has_pick"] = d["候補_3桁_pick"].ne("") & d["候補_3桁_pick"].ne("nan")
     d["__ev"] = pd.to_numeric(d.get("EV_net"), errors="coerce")
     d["__p"]  = pd.to_numeric(d.get("joint_prob"), errors="coerce").fillna(0.0)
+
     d["_rank"] = np.where(d["_has_pick"] & (d["候補_3桁"] == d["候補_3桁_pick"]), 0, 1)
     d = d.sort_values(["date_key", "_rank", "__ev", "__p"], ascending=[True, True, False, False])
     d1 = d.drop_duplicates(subset=["date_key"], keep="first").copy()
+
     need = (d1["候補_3桁"] == "") | (d1["候補_3桁"] == "nan")
     d1.loc[need, "候補_3桁"] = d1.loc[need, "候補_3桁_pick"]
     d1["候補_3桁"] = d1["候補_3桁"].apply(fmt3)
+
     return d1.drop(columns=["_has_pick","_rank","__ev","__p"], errors="ignore")
 
 df_eval = _load_for_eval()
@@ -949,7 +942,7 @@ else:
             else:
                 df_eval["hit"] = False
 
-        # 1日=1本に縮約
+        # ==== 1日=1本 に縮約 ====
         df_eval = _reduce_to_one_pick_for_eval(df_eval)
 
         if K is not None:
@@ -1002,10 +995,12 @@ else:
         if "joint_prob" in df_win.columns:
             st.markdown("**予測確率のキャリブレーション（10ビン）**")
             svals = pd.to_numeric(df_win["joint_prob"], errors="coerce").fillna(0.0).clip(0, 1)
+
             bins = np.linspace(0.0, 1.0, 11)
             labels = [f"{int(a*100)}〜{int(b*100)}%" for a,b in zip(bins[:-1], bins[1:])]
             df_cal = pd.DataFrame({"p": svals, "hit": df_win["hit"].astype(bool)})
             df_cal["bin"] = pd.cut(df_cal["p"], bins=bins, labels=labels, include_lowest=True, right=True)
+
             cal = df_cal.groupby("bin", as_index=False, observed=True).agg(
                 mean_p=("p", "mean"),
                 acc=("hit", "mean"),
@@ -1021,10 +1016,13 @@ else:
                 if d <= -1.0:  return "過信（予測＞実測）"
                 return "概ね一致"
             cal["note"] = cal["diff_pct"].apply(_note)
+
             show = cal[["range_label", "n", "mean_p_pct", "acc_pct", "diff_pct", "note"]].copy()
             show.columns = ["予測確率の範囲", "件数", "平均予測確率（%）", "実際の当たり率（%）", "差（実測−予測）", "評価"]
             st.dataframe(
-                show, hide_index=True, use_container_width=True,
+                show,
+                hide_index=True,
+                use_container_width=True,  # dataframe の use_container_width は現状OK
                 column_config={
                     "予測確率の範囲": st.column_config.TextColumn(width="medium"),
                     "件数": st.column_config.NumberColumn(format="%d"),
@@ -1034,6 +1032,7 @@ else:
                     "評価": st.column_config.TextColumn(),
                 },
             )
+
             ideal = pd.DataFrame({"x":[0,100], "y":[0,100]})
             points = alt.Chart(cal).mark_line(point=True).encode(
                 x=alt.X("mean_p_pct", title="平均予測確率（%）",
@@ -1052,6 +1051,7 @@ else:
             st.info("joint_prob が見つからないためキャリブレーションは省略しました。")
 
 st.markdown("---")
+
 
 # ============ 直近の予測履歴 ============
 st.markdown("### 直近の予測履歴")
@@ -1078,8 +1078,8 @@ else:
            .drop(columns=["_score_ev","_score_p"], errors="ignore")
     )
 
-    dfh["候補_3桁_view"] = dfh["候補_3桁_pick"].replace({"": None, "nan": None}).fillna(dfh["候補_3桁"])
-    need_fill = dfh["候補_3桁_view"].isna() | (dfh["候補_3桁_view"] == "") | (dfh["候補_3桁_view"].str.lower() == "nan")
+    dfh["候補_3桁_view"] = dfh["候補_3桁_pick"].astype("string").replace({"": None, "nan": None}).fillna(dfh["候補_3桁"])
+    need_fill = dfh["候補_3桁_view"].isna() | (dfh["候補_3桁_view"] == "") | (dfh["候補_3桁_view"].astype(str).str.lower() == "nan")
     if need_fill.any():
         rep = _build_daily_rep_from_history()
         if rep is not None and not rep.empty:
@@ -1216,7 +1216,7 @@ else:
         view.to_csv(index=False, encoding="utf-8-sig"),
         file_name="prediction_history_view.csv",
         mime="text/csv",
-        use_container_width=True
+        # use_container_width は削除
     )
 
 # ============ 詳細テーブル（参考） ============

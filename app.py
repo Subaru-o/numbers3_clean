@@ -160,13 +160,12 @@ def winner3_from_raw() -> pd.DataFrame | None:
 # ========== 実績払戻（1口あたり）マップ ==========
 def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame | None:
     """
-    history から「1口あたりの実績払戻」を日付単位で返す。
-
-    - `kind` 列（例: ストレート_金額）は「1口あたりの払戻」とみなす
-    - 10,000〜300,000 の範囲にない値は異常として除外
-    - 1日1レコードに正規化（複数行ある場合は date_key ごとに最後の値を使用）
-
-    戻り値: columns = [date_key, 回号, 払戻_実績]
+    history から 1口あたりの払戻（実績）を日付単位で返す。
+    方針：`ストレート_金額` は **1口あたりの固定金額** としてそのまま採用する。
+    - 口数による割戻しは一切しない
+    - 10,000〜300,000 の範囲に正規化（異常値は NaN として落とす）
+    - 同日重複は最後のレコードを優先
+    返す列: date_key, 回号, 払戻_実績
     """
     hist_path = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
     if hist_path is None:
@@ -189,38 +188,22 @@ def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame |
         else:
             use_col = kind
 
-        # 1口あたり金額として利用
         per_unit = pd.to_numeric(raw[use_col], errors="coerce")
-        # 現実的なレンジだけ残す（10,000〜300,000）
         valid = (per_unit >= 10000) & (per_unit <= 300000)
-        raw["払戻_実績"] = per_unit.where(valid, np.nan)
+        per_unit = per_unit.where(valid, np.nan)
 
-        # 回号はあれば使う
-        if "回号" not in raw.columns:
-            raw["回号"] = np.nan
+        df = raw[["date_key", "回号"]].copy()
+        df["払戻_実績"] = per_unit
 
-        # ---- 1日1行に正規化（date_key ごとに最後のレコードを採用） ----
-        df = (
-            raw.sort_values(["date_key","抽せん日"])
-               .groupby("date_key", as_index=False)
-               .agg(
-                   回号=("回号", "max"),
-                   払戻_実績=("払戻_実績", "last"),
-               )
-        )
-
-        df = df[df["払戻_実績"].notna()].copy()
+        df = df.sort_values("date_key").drop_duplicates("date_key", keep="last")
 
         st.caption("📄 使用しているhistoryファイル: " + str(hist_path))
-        st.info(
-            "payouts_map_from_raw: モード='1口あたり固定（列をそのまま使用）', "
-            f"列='{use_col}', 行数={len(df)}"
-        )
+        st.info("payouts_map_from_raw: モード='1口あたり固定（列をそのまま使用）', 列='" + use_col + f"', 行数={len(df.dropna(subset=['払戻_実績']))}")
 
-        if df.empty:
+        if df["払戻_実績"].notna().any():
+            return df[["date_key", "回号", "払戻_実績"]].copy()
+        else:
             return None
-        return df[["date_key", "回号", "払戻_実績"]].copy()
-
     except Exception as e:
         st.warning(f"payouts_map_from_raw で例外: {e}")
         return None
@@ -229,10 +212,13 @@ def payouts_map_from_raw(kind: str = "ストレート_金額") -> pd.DataFrame |
 def persist_today_pick(pick_date: date, pick_num3: str,
                        ev_adj: float | None = None,
                        prob: float | None = None) -> None:
-    """当日のTop1を prediction_history.csv に first-write-wins で保存。"""
+    """当日のTop1を prediction_history.csv に first-write-wins で保存。
+       - 列の dtype は string に統一して将来の pandas エラーを回避。
+    """
     df = read_csv_safe(PRED_HISTORY)
     OUT_DIR.mkdir(parents=True, exist_ok=True)
 
+    # 既存がない場合の初期 DataFrame（すべて string / float 可）
     if df is None or df.empty:
         df = pd.DataFrame({
             "抽せん日": pd.Series([], dtype="datetime64[ns]"),
@@ -241,6 +227,7 @@ def persist_today_pick(pick_date: date, pick_num3: str,
             "joint_prob_pick": pd.Series([], dtype="float64"),
         })
 
+    # 必須列の dtype 整備
     if "抽せん日" not in df.columns:
         df["抽せん日"] = pd.Series([], dtype="datetime64[ns]")
     if "候補_3桁_pick" not in df.columns:
@@ -434,7 +421,7 @@ st.sidebar.info(
 )
 
 # データ更新はローカル用に残しておく（Cloudでは基本使わない想定）
-do_update = st.sidebar.button("データ更新（scrape_update）", width="stretch")
+do_update = st.sidebar.button("データ更新（scrape_update）", use_container_width=True)
 
 with st.sidebar.expander("⚙ 設定（基本）", expanded=True):
     payout_mode = st.radio("払戻の基準", ["実績（historyの金額を使う）", "固定（下の金額）"], index=0)
@@ -460,15 +447,15 @@ with st.sidebar.expander("🧪 デバッグ", expanded=False):
         st.write(f"(list error: {e})")
 
 with st.sidebar.expander("🧹 キャッシュ", expanded=False):
-    if st.button("Cache クリア & 再実行", width="stretch"):
+    if st.button("Cache クリア & 再実行", use_container_width=True):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
 
 with st.sidebar.expander("🛠 高度な操作（学習/バックフィル）", expanded=False):
-    do_train = st.button("学習（V4）", width="stretch", key="train")
-    do_backfill_hist = st.button("バックフィル（予測履歴）", width="stretch", key="bf_hist")
-    do_backfill_ev   = st.button("バックフィル（EV）", width="stretch", key="bf_ev")
+    do_train = st.button("学習（V4）", use_container_width=True, key="train")
+    do_backfill_hist = st.button("バックフィル（予測履歴）", use_container_width=True, key="bf_hist")
+    do_backfill_ev   = st.button("バックフィル（EV）", use_container_width=True, key="bf_ev")
 
 
 # ============ データ更新（ローカル用） ============
@@ -786,9 +773,12 @@ def _load_for_eval() -> pd.DataFrame:
     if df is None: return pd.DataFrame()
     return df.copy()
 
-# ==== 評価は 1日=1本 に正規化 ====
+# ==== PATCH A: 評価は 1日=1本 に正規化 ====
 def _reduce_to_one_pick_for_eval(df: pd.DataFrame) -> pd.DataFrame:
-    """評価用に 1日=1本 に正規化。"""
+    """評価用に 1日=1本 に正規化。
+    優先順位: 候補_3桁_pick がある日→その行
+              ない日      → EV_net 最大（なければ joint_prob 最大）
+    """
     d = df.copy()
     date_col = next((c for c in ["抽せん日","date","draw_date"] if c in d.columns), None)
     d["date_key"] = pd.to_datetime(d[date_col], errors="coerce").dt.date
@@ -844,23 +834,14 @@ else:
             df_eval["当選番号3"] = df_eval["当選番号3"].map(fmt3)
 
         df_eval = ensure_joint_prob(df_eval)
-
-        # （一旦 hit を作るが、このあと 1日=1本 に縮約した後でもう一度計算し直す）
-        if "当選番号3" in df_eval.columns:
-            df_eval["hit"] = (df_eval["候補_3桁"] != "") & (df_eval["候補_3桁"] == df_eval["当選番号3"])
-        else:
-            df_eval["hit"] = False
+        if ("hit" not in df_eval.columns) or df_eval["hit"].isna().all():
+            if "当選番号3" in df_eval.columns:
+                df_eval["hit"] = (df_eval["候補_3桁"] != "") & (df_eval["候補_3桁"] == df_eval["当選番号3"])
+            else:
+                df_eval["hit"] = False
 
         # ==== 1日=1本 に縮約 ====
         df_eval = _reduce_to_one_pick_for_eval(df_eval)
-
-        # ★ 縮約後の候補で hit を再計算（これが最終的な成績カウントに使われる）
-        if "当選番号3" in df_eval.columns:
-            df_eval["当選番号3"] = df_eval["当選番号3"].map(fmt3)
-            df_eval["候補_3桁"] = df_eval["候補_3桁"].map(fmt3)
-            df_eval["hit"] = (df_eval["候補_3桁"] != "") & (df_eval["候補_3桁"] == df_eval["当選番号3"])
-        else:
-            df_eval["hit"] = False
 
         if K is not None:
             dmax = df_eval[date_col].max()
@@ -890,9 +871,7 @@ else:
 
         df_win["日付"] = df_win[date_col].dt.date
         df_win["spent"]  = float(price)
-        # ★ hit が True の日だけ払戻が入る
-        df_win["return"] = np.where(df_win["hit"], payout_series, 0.0)
-
+        df_win["return"] = df_win["hit"].map(lambda x: 1 if x else 0) * payout_series
         daily = df_win.groupby("日付", as_index=False).agg(
             picks=("候補_3桁","count"), hits=("hit","sum"),
             spent=("spent","sum"), ret=("return","sum"),
@@ -974,9 +953,7 @@ st.markdown("---")
 
 # ============ 直近の予測履歴 ============
 st.markdown("### 直近の予測履歴")
-hist = read_csv_safe(PRED_HISTORY)
-st.caption(f"予測履歴テーブルの元CSV: {PRED_HISTORY} rows={0 if hist is None else len(hist)}")
-rows_option = st.selectbox("表示件数", ["直近30件", "直近60件", "直近120件", "全件"], index=0)
+rows_option = st.selectbox("表示件数", ["直近30件", "直近60件", "直近120件", "全件"], index=3)
 rows_map = {"直近30件": 30, "直近60件": 60, "直近120件": 120, "全件": None}
 N = rows_map[rows_option]
 
@@ -988,6 +965,9 @@ else:
     dfh = _make_date_key(dfh, "抽せん日")
     dfh = _ensure_cand3_cols(dfh)
     dfh = ensure_joint_prob(dfh)
+
+    st.caption(f"予測履歴テーブルの元CSV: {PRED_HISTORY} rows={len(dfh)}  "
+               f"min={dfh['抽せん日'].min()}  max={dfh['抽せん日'].max()}")
 
     dfh["_score_ev"] = pd.to_numeric(dfh.get("EV_net", 0), errors="coerce").fillna(-1)
     dfh["_score_p"]  = pd.to_numeric(dfh.get("joint_prob", 0), errors="coerce").fillna(-1)
@@ -1058,13 +1038,10 @@ else:
     dfh["当選番号3"] = dfh["当選番号3"].fillna("").apply(fmt3)
     dfh["回号表示"] = (
         pd.to_numeric(dfh["回号"], errors="coerce")
-        .astype("Int64")
-        .astype(str)
-        .replace("<NA>", "—")
+          .astype("Int64")
+          .astype(str)
+          .replace("<NA>", "—")
     )
-
-    # 未抽選日の行は除外
-    dfh = dfh[dfh["当選番号3"].notna() & (dfh["当選番号3"] != "")]
 
     JA_WD = ["月曜日","火曜日","水曜日","木曜日","金曜日","土曜日","日曜日"]
     dfh["抽せん日"] = pd.to_datetime(dfh["抽せん日"], errors="coerce")

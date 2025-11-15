@@ -145,7 +145,7 @@ def winner3_from_raw() -> pd.DataFrame | None:
             raw["当選番号3"] = base.apply(fmt3)
         else:
             h = pd.to_numeric(raw.get("百の位"), errors="coerce")
-            t = pd.to_numeric(raw.get("十の位"), errors="coerce")
+            t = pd.to_numeric(raw.get("十の位"), errors="coorce")
             o = pd.to_numeric(raw.get("一の位"), errors="coerce")
             raw["当選番号3"] = (
                 h.fillna(-1).astype(int).astype(str) +
@@ -421,7 +421,7 @@ st.sidebar.info(
 )
 
 # データ更新はローカル用に残しておく（Cloudでは基本使わない想定）
-do_update = st.sidebar.button("データ更新（scrape_update）", use_container_width=True)
+do_update = st.sidebar.button("データ更新（scrape_update）", width="stretch")
 
 with st.sidebar.expander("⚙ 設定（基本）", expanded=True):
     payout_mode = st.radio("払戻の基準", ["実績（historyの金額を使う）", "固定（下の金額）"], index=0)
@@ -447,15 +447,15 @@ with st.sidebar.expander("🧪 デバッグ", expanded=False):
         st.write(f"(list error: {e})")
 
 with st.sidebar.expander("🧹 キャッシュ", expanded=False):
-    if st.button("Cache クリア & 再実行", use_container_width=True):
+    if st.button("Cache クリア & 再実行", width="stretch"):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
 
 with st.sidebar.expander("🛠 高度な操作（学習/バックフィル）", expanded=False):
-    do_train = st.button("学習（V4）", use_container_width=True, key="train")
-    do_backfill_hist = st.button("バックフィル（予測履歴）", use_container_width=True, key="bf_hist")
-    do_backfill_ev   = st.button("バックフィル（EV）", use_container_width=True, key="bf_ev")
+    do_train = st.button("学習（V4）", width="stretch", key="train")
+    do_backfill_hist = st.button("バックフィル（予測履歴）", width="stretch", key="bf_hist")
+    do_backfill_ev   = st.button("バックフィル（EV）", width="stretch", key="bf_ev")
 
 
 # ============ データ更新（ローカル用） ============
@@ -754,6 +754,7 @@ st.markdown("---")
 
 
 # ============ 検証（成績と信頼度） ============
+
 st.subheader("検証（成績と信頼度）")
 left, right = st.columns(2)
 with left:
@@ -801,6 +802,58 @@ def _reduce_to_one_pick_for_eval(df: pd.DataFrame) -> pd.DataFrame:
     d1["候補_3桁"] = d1["候補_3桁"].apply(fmt3)
 
     return d1.drop(columns=["_has_pick","_rank","__ev","__p"], errors="ignore")
+
+
+def _build_hit_map_for_history() -> pd.DataFrame | None:
+    """検証タブと同じロジックで『その日の pick が当たったか』を日付ごとに返す。"""
+    df_eval = _load_for_eval()
+    if df_eval is None or df_eval.empty:
+        return None
+
+    # 日付列
+    date_col = None
+    for c in ["抽せん日", "date", "draw_date"]:
+        if c in df_eval.columns:
+            date_col = c
+            break
+    if date_col is None:
+        return None
+
+    df_eval[date_col] = pd.to_datetime(df_eval[date_col], errors="coerce")
+    df_eval = df_eval[df_eval[date_col].notna()].copy()
+    df_eval["date_key"] = df_eval[date_col].dt.date
+
+    # 候補番号
+    if "候補_3桁" not in df_eval.columns:
+        df_eval["候補_3桁"] = ""
+    df_eval["候補_3桁"] = df_eval["候補_3桁"].fillna("").astype(str)
+    if "候補_3桁_pick" not in df_eval.columns:
+        df_eval["候補_3桁_pick"] = ""
+    else:
+        df_eval["候補_3桁_pick"] = df_eval["候補_3桁_pick"].fillna("").astype(str)
+
+    # 当選番号
+    if "当選番号3" not in df_eval.columns:
+        wdf = winner3_from_raw()
+        if wdf is not None:
+            df_eval = df_eval.merge(wdf, left_on=date_col, right_on="抽せん日", how="left")
+    if "当選番号3" in df_eval.columns:
+        df_eval["当選番号3"] = df_eval["当選番号3"].map(fmt3)
+
+    df_eval = ensure_joint_prob(df_eval)
+
+    if "当選番号3" in df_eval.columns:
+        df_eval["hit"] = (
+            df_eval["候補_3桁"].map(fmt3).ne("") &
+            (df_eval["候補_3桁"].map(fmt3) == df_eval["当選番号3"])
+        )
+    else:
+        df_eval["hit"] = False
+
+    df_one = _reduce_to_one_pick_for_eval(df_eval)
+    hit_map = df_one[["date_key", "hit"]].copy().rename(columns={"hit": "hit_eval"})
+    return hit_map
+
 
 df_eval = _load_for_eval()
 if df_eval.empty:
@@ -953,7 +1006,7 @@ st.markdown("---")
 
 # ============ 直近の予測履歴 ============
 st.markdown("### 直近の予測履歴")
-rows_option = st.selectbox("表示件数", ["直近30件", "直近60件", "直近120件", "全件"], index=3)
+rows_option = st.selectbox("表示件数", ["直近30件", "直近60件", "直近120件", "全件"], index=0)
 rows_map = {"直近30件": 30, "直近60件": 60, "直近120件": 120, "全件": None}
 N = rows_map[rows_option]
 
@@ -965,9 +1018,6 @@ else:
     dfh = _make_date_key(dfh, "抽せん日")
     dfh = _ensure_cand3_cols(dfh)
     dfh = ensure_joint_prob(dfh)
-
-    st.caption(f"予測履歴テーブルの元CSV: {PRED_HISTORY} rows={len(dfh)}  "
-               f"min={dfh['抽せん日'].min()}  max={dfh['抽せん日'].max()}")
 
     dfh["_score_ev"] = pd.to_numeric(dfh.get("EV_net", 0), errors="coerce").fillna(-1)
     dfh["_score_p"]  = pd.to_numeric(dfh.get("joint_prob", 0), errors="coerce").fillna(-1)
@@ -1043,13 +1093,24 @@ else:
           .replace("<NA>", "—")
     )
 
+    # 未抽選日の行は除外
+    dfh = dfh[dfh["当選番号3"].notna() & (dfh["当選番号3"] != "")]
+
     JA_WD = ["月曜日","火曜日","水曜日","木曜日","金曜日","土曜日","日曜日"]
     dfh["抽せん日"] = pd.to_datetime(dfh["抽せん日"], errors="coerce")
     dfh["抽せん日_表示"] = dfh["抽せん日"].dt.strftime("%Y年%m月%d日")
     dfh["曜日"] = dfh["抽せん日"].dt.weekday.map(lambda i: JA_WD[i] if pd.notna(i) else "")
 
     dfh["候補_3桁_view"] = dfh["候補_3桁_view"].fillna("").apply(fmt3)
-    dfh["的中"] = (dfh["候補_3桁_view"] != "") & (dfh["候補_3桁_view"] == dfh["当選番号3"])
+
+    # --- 検証タブと同じ hit 判定を利用 ---
+    hit_map = _build_hit_map_for_history()
+    if hit_map is not None and not hit_map.empty:
+        dfh = dfh.merge(hit_map, on="date_key", how="left")
+        dfh["的中"] = dfh["hit_eval"].fillna(False).astype(bool)
+        dfh.drop(columns=["hit_eval"], inplace=True)
+    else:
+        dfh["的中"] = (dfh["候補_3桁_view"] != "") & (dfh["候補_3桁_view"] == dfh["当選番号3"])
 
     dfh["joint_prob"] = pd.to_numeric(dfh.get("joint_prob"), errors="coerce").fillna(0.0)
     dfh["EV_net"] = pd.to_numeric(dfh.get("EV_net"), errors="coerce")

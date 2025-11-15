@@ -1058,9 +1058,9 @@ else:
     dfh["当選番号3"] = dfh["当選番号3"].fillna("").apply(fmt3)
     dfh["回号表示"] = (
         pd.to_numeric(dfh["回号"], errors="coerce")
-          .astype("Int64")
-          .astype(str)
-          .replace("<NA>", "—")
+        .astype("Int64")
+        .astype(str)
+        .replace("<NA>", "—")
     )
 
     # 未抽選日の行は除外

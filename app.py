@@ -974,6 +974,8 @@ st.markdown("---")
 
 # ============ 直近の予測履歴 ============
 st.markdown("### 直近の予測履歴")
+hist = read_csv_safe(PRED_HISTORY)
+st.caption(f"予測履歴テーブルの元CSV: {PRED_HISTORY} rows={0 if hist is None else len(hist)}")
 rows_option = st.selectbox("表示件数", ["直近30件", "直近60件", "直近120件", "全件"], index=0)
 rows_map = {"直近30件": 30, "直近60件": 60, "直近120件": 120, "全件": None}
 N = rows_map[rows_option]

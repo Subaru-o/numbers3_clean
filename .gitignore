@@ -7,9 +7,11 @@ __pycache__/
 .env
 *.log
 
-# Raw / Big data
+# Raw / Big data → 完全に git 対象外でOK
 data/raw/
 data/raw_fixed/
+
+# モデル類 → Git から除外
 artifacts/models*/
 artifacts/**/models*/
 artifacts/**/*.joblib
@@ -17,6 +19,16 @@ artifacts/**/*.joblib
 *.pkl
 *.onnx
 
-# OS
+# ====== ★ 重要：artifacts/outputs の CSV は Git 管理する ======
+# まず artifacts/ 全体を ignore
+artifacts/*
+
+# ただし outputs/ は除外（＝Git管理対象）
+!artifacts/outputs/
+
+# outputs/ の CSV も許可
+!artifacts/outputs/*.csv
+
+# OS files
 .DS_Store
 Thumbs.db

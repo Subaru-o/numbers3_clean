@@ -1,17 +1,33 @@
-﻿# Python / venv
+﻿# =========================================
+# Python / venv
+# =========================================
 __pycache__/
 .venv/
 *.pyc
 
-# Local env
+# =========================================
+# Local environment
+# =========================================
 .env
 *.log
 
-# Raw / Big data → 完全に git 対象外でOK
-data/raw/
+# =========================================
+# Raw / Big data
+# → raw は基本 ignore、ただし最新の history だけ Git 管理
+# =========================================
+
+# まず raw を全部 ignore
+data/raw/*
+
+# ★ 最新の history だけ許可（あなたの環境に合わせてここを書き換える）
+!data/raw/20201201-20251114_Numbers3features.csv
+
+# raw_fixed も ignore
 data/raw_fixed/
 
-# モデル類 → Git から除外
+# =========================================
+# Model files（巨大） → 常に除外
+# =========================================
 artifacts/models*/
 artifacts/**/models*/
 artifacts/**/*.joblib
@@ -19,16 +35,23 @@ artifacts/**/*.joblib
 *.pkl
 *.onnx
 
-# ====== ★ 重要：artifacts/outputs の CSV は Git 管理する ======
-# まず artifacts/ 全体を ignore
+# =========================================
+# artifacts 配下の制御
+# → 基本 ignore
+# → outputs/ の CSV だけ Git 管理
+# =========================================
+
+# 全部 ignore
 artifacts/*
 
-# ただし outputs/ は除外（＝Git管理対象）
+# outputs/ は Git 管理
 !artifacts/outputs/
 
-# outputs/ の CSV も許可
+# outputs の CSV も管理
 !artifacts/outputs/*.csv
 
-# OS files
+# =========================================
+# OS generated files
+# =========================================
 .DS_Store
 Thumbs.db

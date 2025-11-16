@@ -41,6 +41,29 @@ JST = timezone(timedelta(hours=9))
 
 st.set_page_config(page_title="Numbers3 EV Dashboard（ミニマル ビュー専用）", layout="wide")
 
+# ====== 最終更新日時の表示 ======
+def get_last_update_time():
+    """prediction_history.csv の更新日時を JST で返す"""
+    target = PRED_HISTORY  # artifacts/outputs/prediction_history.csv
+    if target.exists():
+        ts = datetime.fromtimestamp(target.stat().st_mtime, JST)
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+    else:
+        return "—（まだ生成されていません）"
+
+last_update = get_last_update_time()
+
+st.markdown(
+    f"""
+    <div style="padding:10px 16px;margin-bottom:10px;
+                border-radius:10px;background:#f6f6f9;
+                border:1px solid #ddd;">
+        <b>🔄 最終更新:</b> {last_update}
+    </div>
+    """,
+    unsafe_allow_html=True
+)
+
 
 # ============ ユーティリティ ============
 def fmt3(v: object) -> str:

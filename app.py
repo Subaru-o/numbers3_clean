@@ -41,16 +41,23 @@ JST = timezone(timedelta(hours=9))
 
 st.set_page_config(page_title="Numbers3 EV Dashboard（ミニマル ビュー専用）", layout="wide")
 
-# ====== 最終更新日時の表示（ダークモード対応） ======
-def get_last_update_time():
-    target = PRED_HISTORY
-    if target.exists():
-        ts = datetime.fromtimestamp(target.stat().st_mtime, JST)
-        return ts.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        return "—（まだ生成されていません）"
+# ====== 最終更新日時（Cloud 安定版） ======
+def get_last_update_time_from_history():
+    df = read_csv_safe(PRED_HISTORY)
+    if df is None or df.empty:
+        return "—（履歴なし）"
 
-last_update = get_last_update_time()
+    # 抽せん日 を datetime に変換
+    if "抽せん日" in df.columns:
+        df["抽せん日"] = pd.to_datetime(df["抽せん日"], errors="coerce")
+        latest = df["抽せん日"].max()
+        if pd.notna(latest):
+            return latest.strftime("%Y-%m-%d %H:%M:%S")
+
+    # fallback
+    return "—（日付なし）"
+
+last_update = get_last_update_time_from_history()
 
 st.markdown(
     f"""
@@ -58,16 +65,17 @@ st.markdown(
         padding:12px 18px;
         margin-bottom:18px;
         border-radius:10px;
-        background:#2b2b2b;             /* ダークモード背景 */
-        color:#ffffff;                  /* 白文字で視認性UP */
+        background:#2b2b2b;
+        color:#ffffff;
         border:1px solid #555;
         font-size:16px;
-        ">
+    ">
         <b>🔄 最終更新:</b> {last_update}
     </div>
     """,
     unsafe_allow_html=True
 )
+
 
 
 # ============ ユーティリティ ============

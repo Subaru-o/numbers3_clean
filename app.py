@@ -54,12 +54,25 @@ st.components.v1.iframe(
 
 # ====== 最終更新日時の表示（ダークモード対応） ======
 def get_last_update_time():
-    target = PRED_HISTORY
-    if target.exists():
-        ts = datetime.fromtimestamp(target.stat().st_mtime, JST)
+    """
+    ビュー専用なので、
+    1. ローカルで生成して Git に上げる ev_report.csv（EV_CSV）の mtime を最優先
+    2. フォールバックとして prediction_history.csv（PRED_HISTORY）の mtime
+    を最終更新日時として表示する。
+    """
+    # ① EVレポートの更新日時（ローカルでの最新化タイミングにほぼ一致）
+    if EV_CSV.exists():
+        ts = datetime.fromtimestamp(EV_CSV.stat().st_mtime, JST)
         return ts.strftime("%Y-%m-%d %H:%M:%S")
-    else:
-        return "—（まだ生成されていません）"
+
+    # ② 履歴ファイルの更新日時（EV_CSV がまだ無い場合）
+    if PRED_HISTORY.exists():
+        ts = datetime.fromtimestamp(PRED_HISTORY.stat().st_mtime, JST)
+        return ts.strftime("%Y-%m-%d %H:%M:%S")
+
+    # ③ どちらも無い
+    return "—（まだ生成されていません）"
+
 
 last_update = get_last_update_time()
 
@@ -184,7 +197,7 @@ def winner3_from_raw() -> pd.DataFrame | None:
             raw["当選番号3"] = base.apply(fmt3)
         else:
             h = pd.to_numeric(raw.get("百の位"), errors="coerce")
-            t = pd.to_numeric(raw.get("十の位"), errors="coorce")
+            t = pd.to_numeric(raw.get("十の位"), errors="coerce")
             o = pd.to_numeric(raw.get("一の位"), errors="coerce")
             raw["当選番号3"] = (
                 h.fillna(-1).astype(int).astype(str) +

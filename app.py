@@ -41,6 +41,17 @@ JST = timezone(timedelta(hours=9))
 
 st.set_page_config(page_title="Numbers3 EV Dashboard（ミニマル ビュー専用）", layout="wide")
 
+import streamlit as st
+
+st.title("Numbers3 抽せんライブ中継")
+
+st.components.v1.iframe(
+    "https://takarakuji.webcdn.stream.ne.jp/www11/takarakuji/live/index.html",
+    width=800,
+    height=450
+)
+
+
 # ====== 最終更新日時の表示（ダークモード対応） ======
 def get_last_update_time():
     target = PRED_HISTORY

@@ -680,6 +680,18 @@ if 'do_backfill_ev' in locals() and do_backfill_ev:
 st.title("Numbers3 Dashboard（ビュー専用）")
 st.caption("ローカルで生成した予測結果・EVレポートを可視化します。")
 
+# 🔍 デバッグ用：どの history を読んでいるか表示
+try:
+    hist_path = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
+    if hist_path is not None and hist_path.exists():
+        df_dbg = pd.read_csv(hist_path, encoding="utf-8-sig", usecols=lambda c: c == "抽せん日")
+        last_date_dbg = pd.to_datetime(df_dbg["抽せん日"], errors="coerce").max()
+        st.caption(f"使用 history: {hist_path.name} / 最終 抽せん日: {last_date_dbg.date() if pd.notna(last_date_dbg) else '不明'}")
+    else:
+        st.caption("使用 history: なし")
+except Exception as e:
+    st.caption(f"history デバッグ中にエラー: {e}")
+
 d = next_draw_from_history()
 draw_str = d.strftime("%Y年%m月%d日") if d else "—"
 wday_str = weekday_ja(d) if d else "—"

@@ -13,17 +13,17 @@ __pycache__/
 
 # =========================================
 # Raw / Big data
-# → raw は基本 ignore、ただし最新の history だけ Git 管理
+# → raw は基本 ignore、ただし *_Numbers3features.csv だけ Git 管理
 # =========================================
 
 # まず raw を全部 ignore
-data/raw/*
+data/raw/**
 
-# ★ 最新の history だけ許可（あなたの環境に合わせてここを書き換える）
-!data/raw/20201201-20251114_Numbers3features.csv
+# ★ Numbers3features の履歴 CSV だけ許可（毎回ファイル名が変わってもOK）
+!data/raw/*_Numbers3features.csv
 
 # raw_fixed も ignore
-data/raw_fixed/
+data/raw_fixed/**
 
 # =========================================
 # Model files（巨大） → 常に除外

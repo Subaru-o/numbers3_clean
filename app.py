@@ -39,7 +39,7 @@ DEFAULT_PAYOUT = int(_secret("N3_PAYOUT", 90000))
 
 JST = timezone(timedelta(hours=9))
 
-st.set_page_config(page_title="Numbers3 EV Dashboard（ミニマル ビュー専用）", layout="wide")
+st.set_page_config(page_title="Numbers3 EV Dashboard", layout="wide")
 
 import streamlit as st
 

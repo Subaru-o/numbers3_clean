@@ -1078,32 +1078,40 @@ hist = read_csv_safe(PRED_HISTORY)
 if hist is None or hist.empty:
     st.info("予測履歴がまだありません。ローカルで予測＋履歴生成を行い、prediction_history.csv を更新してください。")
 else:
+    # --- 1) もとの履歴を前処理 ---
     dfh = hist.copy()
+
+    # 日付キー作成
     dfh = _make_date_key(dfh, "抽せん日")
     dfh = _ensure_cand3_cols(dfh)
     dfh = ensure_joint_prob(dfh)
 
-    dfh["_score_ev"] = pd.to_numeric(dfh.get("EV_net", 0), errors="coerce").fillna(-1)
-    dfh["_score_p"]  = pd.to_numeric(dfh.get("joint_prob", 0), errors="coerce").fillna(-1)
+    # 🔥 ここが今回のポイント：1日=1本の pick に正規化
+    #    （候補_3桁_pick がある行を最優先で採用）
+    dfh = _reduce_to_one_pick_for_eval(dfh)
 
-    dfh = (
-        dfh.sort_values(["date_key", "_score_ev", "_score_p"], ascending=[False, False, False])
-           .drop_duplicates(subset=["date_key"], keep="first")
-           .copy()
-           .drop(columns=["_score_ev","_score_p"], errors="ignore")
-    )
+    # date_key がなくなっている可能性があるので再生成
+    dfh = _make_date_key(dfh, "抽せん日")
 
-    dfh["候補_3桁_view"] = dfh["候補_3桁_pick"].astype("string").replace({"": None, "nan": None}).fillna(dfh["候補_3桁"])
-    need_fill = dfh["候補_3桁_view"].isna() | (dfh["候補_3桁_view"] == "") | (dfh["候補_3桁_view"].astype(str).str.lower() == "nan")
-    if need_fill.any():
-        rep = _build_daily_rep_from_history()
-        if rep is not None and not rep.empty:
-            dfh = dfh.merge(rep, on="date_key", how="left")
-            dfh.loc[need_fill, "候補_3桁_view"] = dfh.loc[need_fill, "cand3_rep"].fillna(dfh.loc[need_fill, "候補_3桁_view"])
-            dfh.drop(columns=["cand3_rep"], inplace=True, errors="ignore")
-    dfh["候補_3桁_view"] = dfh["候補_3桁_view"].apply(fmt3).replace("", "—")
+    # 表示用の候補番号：
+    #  - 候補_3桁_pick があればそれを優先
+    #  - なければ 候補_3桁
+    dfh["候補_3桁"] = dfh["候補_3桁"].fillna("").astype(str).apply(fmt3)
+    if "候補_3桁_pick" in dfh.columns:
+        pick_col = dfh["候補_3桁_pick"].fillna("").astype(str).apply(fmt3)
+        use_pick = pick_col.ne("") & pick_col.ne("nan")
+        dfh.loc[use_pick, "候補_3桁"] = pick_col[use_pick]
 
-    # 当選番号＆回号
+    dfh["候補_3桁_view"] = dfh["候補_3桁"].apply(fmt3).replace("", "—")
+
+    # joint_prob も pick 用があればそちらを優先
+    jp = pd.to_numeric(dfh.get("joint_prob"), errors="coerce")
+    if "joint_prob_pick" in dfh.columns:
+        jp_pick = pd.to_numeric(dfh.get("joint_prob_pick"), errors="coerce")
+        jp = jp_pick.where(jp_pick.notna(), jp)
+    dfh["joint_prob"] = jp.fillna(0.0).clip(0, 1)
+
+    # 当選番号＆回号を history から付与
     def _load_answer_index_map() -> pd.DataFrame | None:
         p = find_latest_history(DATA_RAW.stat().st_mtime if DATA_RAW.exists() else None)
         if p is None:
@@ -1116,10 +1124,12 @@ else:
             raw["抽せん日"] = pd.to_datetime(raw["抽せん日"], errors="coerce")
             raw = raw[raw["抽せん日"].notna()].copy()
             raw["date_key"] = raw["抽せん日"].dt.date
+
             if "当選番号" in raw.columns:
                 base = pd.to_numeric(raw["当選番号"], errors="coerce")
             else:
                 base = pd.to_numeric(raw.get("当せん番号"), errors="coerce")
+
             if base is not None:
                 raw["当選番号3"] = base.apply(fmt3)
             else:
@@ -1128,6 +1138,7 @@ else:
                     pd.to_numeric(raw.get("十の位"), errors="coerce").astype("Int64").astype(str) +
                     pd.to_numeric(raw.get("一の位"), errors="coerce").astype("Int64").astype(str)
                 ).str.zfill(3).apply(fmt3)
+
             raw["回号"] = pd.to_numeric(raw.get("回号"), errors="coerce").astype("Int64")
             raw = raw.sort_values("抽せん日").drop_duplicates("date_key", keep="last")
             return raw[["date_key","当選番号3","回号"]].copy()
@@ -1158,31 +1169,20 @@ else:
     )
 
     # 未抽選日の行は除外
-    dfh = dfh[dfh["当選番号3"].notna() & (dfh["当選番号3"] != "")]
+    dfh = dfh[dfh["当選番号3"] != ""].copy()
 
     JA_WD = ["月曜日","火曜日","水曜日","木曜日","金曜日","土曜日","日曜日"]
     dfh["抽せん日"] = pd.to_datetime(dfh["抽せん日"], errors="coerce")
     dfh["抽せん日_表示"] = dfh["抽せん日"].dt.strftime("%Y年%m月%d日")
     dfh["曜日"] = dfh["抽せん日"].dt.weekday.map(lambda i: JA_WD[i] if pd.notna(i) else "")
 
-    dfh["候補_3桁_view"] = dfh["候補_3桁_view"].fillna("").apply(fmt3)
-
-    # --- 検証タブと同じ hit 判定を利用 ---
-    hit_map = _build_hit_map_for_history()
-    if hit_map is not None and not hit_map.empty:
-        dfh = dfh.merge(hit_map, on="date_key", how="left")
-        dfh["的中"] = dfh["hit_eval"].fillna(False).astype(bool)
-        dfh.drop(columns=["hit_eval"], inplace=True)
-    else:
-        dfh["的中"] = (dfh["候補_3桁_view"] != "") & (dfh["候補_3桁_view"] == dfh["当選番号3"])
-
-    dfh["joint_prob"] = pd.to_numeric(dfh.get("joint_prob"), errors="coerce").fillna(0.0)
+    # --- EV の表示値を決定 ---
     dfh["EV_net"] = pd.to_numeric(dfh.get("EV_net"), errors="coerce")
     dfh["EV_net_view"] = dfh["EV_net"]
 
     need_ev = dfh["EV_net_view"].isna() | (dfh["EV_net_view"] == 0)
     if "EV_net_adj_pick" in dfh.columns:
-        adj = pd.to_numeric(dfh["EV_net_adj_pick"], errors="coerce")
+        adj = pd.to_numeric(dfh.get("EV_net_adj_pick"), errors="coerce")
         dfh.loc[need_ev & adj.notna(), "EV_net_view"] = adj
 
     still = dfh["EV_net_view"].isna()
@@ -1201,8 +1201,20 @@ else:
             pays = pd.Series(float(payout), index=dfh.index)
 
         pays = pd.to_numeric(pays, errors="coerce").fillna(float(payout)).clip(10000, 300000)
-        jp = pd.to_numeric(dfh.get("joint_prob"), errors="coerce").fillna(0.0).clip(0,1)
-        dfh.loc[still, "EV_net_view"] = (jp * pays - float(price)).loc[still]
+        jp2 = dfh["joint_prob"].fillna(0.0).clip(0, 1)
+        dfh.loc[still, "EV_net_view"] = (jp2 * pays - float(price)).loc[still]
+
+    # --- 検証タブと同じ hit 判定を利用 ---
+    hit_map = _build_hit_map_for_history()
+    if hit_map is not None and not hit_map.empty:
+        dfh = dfh.merge(hit_map, on="date_key", how="left")
+        dfh["的中"] = dfh["hit_eval"].fillna(False).astype(bool)
+        dfh.drop(columns=["hit_eval"], inplace=True)
+    else:
+        dfh["的中"] = (dfh["候補_3桁_view"] != "") & (dfh["候補_3桁_view"] == dfh["当選番号3"])
+
+    # 新しい方から並べ替え
+    dfh = dfh.sort_values("date_key", ascending=False)
 
     view = pd.DataFrame({
         "抽選日": dfh["抽せん日_表示"].fillna("—"),
@@ -1240,6 +1252,7 @@ else:
         file_name="prediction_history_view.csv",
         mime="text/csv",
     )
+
 
 # ============ 詳細テーブル（参考） ============
 with st.expander("📊 詳細テーブル（上位200行）", expanded=False):

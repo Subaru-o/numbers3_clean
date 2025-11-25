@@ -27,6 +27,8 @@ PRED_HISTORY_TMP = OUT_DIR / "prediction_history.tmp.csv"  # 安定マージ用�
 
 MODELS_V4 = ROOT / "artifacts" / "models_V4_XGB"
 
+JST = timezone(timedelta(hours=9))
+
 # --- secrets 安全取得ヘルパ
 def _secret(key: str, default=None):
     try:
@@ -37,12 +39,92 @@ def _secret(key: str, default=None):
 DEFAULT_PRICE  = int(_secret("N3_PRICE",  200))
 DEFAULT_PAYOUT = int(_secret("N3_PAYOUT", 90000))
 
-JST = timezone(timedelta(hours=9))
+# ============ ページ設定 & グローバルCSS ============
+st.set_page_config(
+    page_title="Numbers3 EV Dashboard",
+    page_icon="🎯",
+    layout="wide",
+)
 
-st.set_page_config(page_title="Numbers3 EV Dashboard", layout="wide")
+def inject_global_css() -> None:
+    """ダッシュボード全体の見た目（テーマ）を整える CSS."""
+    st.markdown("""
+        <style>
+        /* メイン背景色 */
+        .main {
+            background-color: #F4F7FA;
+        }
 
-import streamlit as st
+        /* コンテナ横幅調整 */
+        .block-container {
+            padding-top: 1.5rem;
+            padding-bottom: 3rem;
+            max-width: 1200px;
+        }
 
+        /* サイドバー */
+        section[data-testid="stSidebar"] {
+            background-color: #0F172A;
+        }
+        section[data-testid="stSidebar"] * {
+            color: #E5E7EB !important;
+        }
+
+        /* 共通カードスタイル */
+        .subaru-card {
+            background-color: #FFFFFF;
+            border-radius: 12px;
+            padding: 1.1rem 1.2rem;
+            box-shadow: 0 2px 6px rgba(15,23,42,0.08);
+            border: 1px solid #E2E8F0;
+        }
+        .subaru-card-title {
+            font-weight: 600;
+            font-size: 0.95rem;
+            color: #64748B;
+        }
+        .subaru-card-value {
+            font-weight: 700;
+            font-size: 1.6rem;
+            letter-spacing: 0.08em;
+            color: #0F172A;
+        }
+        .subaru-card-sub {
+            font-size: 0.80rem;
+            color: #6B7280;
+            margin-top: 0.35rem;
+            line-height: 1.6;
+        }
+
+        /* 小さなラベルピル */
+        .subaru-pill {
+            display: inline-flex;
+            align-items: center;
+            padding: 2px 8px;
+            border-radius: 999px;
+            font-size: 0.7rem;
+            font-weight: 500;
+            background: #EFF6FF;
+            color: #1D4ED8;
+            margin-left: 0.25rem;
+        }
+
+        /* EV 高低で色を分けたい場合のクラス（必要に応じて使う） */
+        .ev-positive {
+            color: #16A34A;
+            font-weight: 600;
+        }
+        .ev-negative {
+            color: #DC2626;
+            font-weight: 600;
+        }
+        </style>
+    """, unsafe_allow_html=True)
+
+inject_global_css()
+
+
+# ====== ライブ配信エリア ======
 st.title("Numbers3 抽せんライブ中継")
 
 st.components.v1.iframe(
@@ -82,8 +164,8 @@ st.markdown(
         padding:12px 18px;
         margin-bottom:18px;
         border-radius:10px;
-        background:#2b2b2b;             /* ダークモード背景 */
-        color:#ffffff;                  /* 白文字で視認性UP */
+        background:#2b2b2b;
+        color:#ffffff;
         border:1px solid #555;
         font-size:16px;
         ">
@@ -368,7 +450,170 @@ def badge_html(label: str, value: str) -> str:
 """.strip()
 
 
-# --- 抽せん日ターゲット（JST・土日スキップ）
+# === 今日の予測カード用ユーティリティ ===
+@st.cache_data
+def load_next_prediction() -> pd.DataFrame:
+    if NEXT_CSV.exists():
+        try:
+            return pd.read_csv(NEXT_CSV, encoding="utf-8-sig")
+        except Exception:
+            return pd.read_csv(NEXT_CSV)
+    return pd.DataFrame()
+
+def render_today_cards(df_next: pd.DataFrame, topn: int = 3) -> None:
+    """本日の TopN 予測をカード風に表示する."""
+    if df_next is None or df_next.empty:
+        st.info("まだ next_prediction.csv がありません。ローカルで最新化スクリプトを実行してください。")
+        return
+
+    # 抽せん日（列名は環境に合わせて調整）
+    draw_date = str(df_next.iloc[0].get("抽せん日", "")).split(" ")[0]
+
+    st.markdown(f"### 🎯 今日の予測候補 — {draw_date}")
+
+    df_top = df_next.head(topn)
+
+    cols = st.columns(len(df_top))
+    for i, (_, row) in enumerate(df_top.iterrows()):
+        with cols[i]:
+            # 候補番号
+            num = row.get("候補_3桁", row.get("予測番号", row.get("番号", "???")))
+            try:
+                num_text = f"{int(num):03d}"
+            except Exception:
+                num_text = fmt3(num)
+
+            # 確率
+            prob = row.get("joint_prob", np.nan)
+            try:
+                prob = float(prob)
+            except Exception:
+                prob = np.nan
+            prob_text = f"{prob:.1%}" if isinstance(prob, (float, int)) and not np.isnan(prob) else "—"
+
+            # EV（候補列をいくつか見る）
+            ev = None
+            for key in ["EV_net", "EV_net_adj", "EV", "ev"]:
+                if key in row.index:
+                    try:
+                        ev = float(row.get(key))
+                        break
+                    except Exception:
+                        continue
+            ev_text = f"{ev:,.0f} 円" if isinstance(ev, (float, int)) and not np.isnan(ev) else "—"
+
+            st.markdown(f"""
+                <div class="subaru-card">
+                  <div class="subaru-card-title">
+                    第 {i+1} 候補
+                    <span class="subaru-pill">Top {i+1}</span>
+                  </div>
+                  <div class="subaru-card-value">
+                    {num_text}
+                  </div>
+                  <div class="subaru-card-sub">
+                    予測確率: {prob_text}<br>
+                    EV(期待値): {ev_text}
+                  </div>
+                </div>
+            """, unsafe_allow_html=True)
+
+
+# === 説明カード（UX強化） ===
+def render_explanation_cards() -> None:
+    """Numbers3 予測ロジックや使い方の説明カード群."""
+    st.markdown("## ℹ 説明・ヘルプ")
+
+    with st.expander("🔍 このダッシュボードの予測ロジック（ざっくり）", expanded=False):
+        st.markdown("""
+- このダッシュボードは、**機械学習モデルで 000〜999 の全パターンの確率を予測**しています。
+- 過去の抽せんデータから特徴量（直近の出目傾向・出現頻度・曜日など）を作成し、
+  **1000クラス分類モデル** で「次に出そうな 3 桁の番号」を計算しています。
+- モデルは、すべての番号に対して「確率（joint_prob）」を出し、
+  その中から **上位 TopN（例: 20件）だけをランキング** して `next_prediction.csv` に保存します。
+- ダッシュボード上部のカードは、その中でも **特に上位の候補（例: Top3）** を抜き出したものです。
+        """)
+
+    with st.expander("🎲 なぜ前日と同じ番号が出ることがあるの？（pick が連続しすぎ問題）", expanded=False):
+        st.markdown("""
+**「前日とまったく同じ候補が出ているけど、バグじゃない？」**
+というパターンについての説明です。
+
+- モデルは「過去の出目パターン」から **確率の高い番号** を選んでいます。
+- 直近の傾向が似ている場合、
+  → **「昨日と今日で“条件”がほとんど同じ」** と判断されることがあります。
+- その結果として、
+  → **同じ番号が Top 候補として連続して選ばれる** ことがあります。
+
+これは、
+
+> 「同じ数字をゴリ押ししている」のではなく、
+> **「似た状況では同じ答えを返す」という統計モデルの自然な動き**
+
+です。
+
+ただし、内部では次のようなチェックも行っています（運用方針）：
+
+- 予測用データ（特徴量）が正しく更新されているか
+- 同じ特徴量で毎回走っていないか（履歴読み込みのエラーなど）
+- 予測結果の分布が極端に偏っていないか
+
+これらを満たした上で **同じ番号が続く** 場合は、
+「モデルがその番号をかなり有望と見ている状態」と解釈してください。
+        """)
+
+    with st.expander("💰 EV（期待値）の見方", expanded=False):
+        st.markdown("""
+このダッシュボードでは、**1口200円 / 当たり90,000円（ストレート）** を前提に
+各番号の **EV（期待値）** を計算しています。
+
+- ある番号の的中確率を `p` とします。
+- この番号を 1口だけ買ったときの期待値は
+
+> `EV = p × 90,000円 − 200円`
+
+となります。
+
+- `EV > 0` なら、**理論上は「買えば買うほど得」な番号**
+- `EV < 0` なら、**理論上は「長期的にはマイナス」な番号**
+
+として解釈できます。
+
+ただし、Numbers3 はもともと **1/1000 の運ゲー** なので、
+
+- EV がプラスでも「単発で当たる保証」はありません。
+- あくまで「長期的に同じ条件で買い続けた場合の平均的な期待値」です。
+        """)
+
+    with st.expander("🧪 予測の更新タイミングと履歴の扱い", expanded=False):
+        st.markdown("""
+- 元データ（*_Numbers3features.csv）が更新されると、
+  新しい履歴をもとに **最新1件分の予測** を行います。
+- 予測結果は
+  - `next_prediction.csv`（最新の TopN 候補）
+  - `ev_report.csv`（EV順に並べたレポート）
+  - `prediction_history.csv`（過去の予測履歴）
+  として保存され、ダッシュボードで参照しています。
+
+運用上のポイント：
+
+- **最新日の1件だけをターゲットに予測** しているため、
+  毎日スクリプトを回すだけで「今日の予測」が自動更新されます。
+- 過去のバックテストや傾向を見るときは、
+  `prediction_history.csv` を使って「どの番号をいつ推していたか」を検証できます。
+        """)
+
+    with st.expander("⚠ ご利用上の注意（免責）", expanded=False):
+        st.markdown("""
+- このツールは **当せんを保証するものではありません**。
+- すべての予測は、過去データに基づく **統計的な推定** に過ぎません。
+- Numbers3 は本質的にランダム性が強く、
+  **短期的には「良い予測」でも外れることが普通にあります。**
+- 購入は **余裕資金の範囲内で、自己責任で** お願いします。
+        """)
+
+
+# --- 抽せん日ターゲット（JST・土日スキップ） ---
 def _next_weekday(d: date) -> date:
     while d.weekday() >= 5:
         d += timedelta(days=1)
@@ -418,7 +663,7 @@ def next_index_from_history() -> str:
     except Exception:
         return "—"
 
-# ---- 候補_3桁の強制補完
+# ---- 候補_3桁の強制補完 ----
 def _ensure_cand3_cols(df: pd.DataFrame) -> pd.DataFrame:
     d = df.copy()
     if "候補_3桁" not in d.columns or d["候補_3桁"].isna().all():
@@ -473,7 +718,7 @@ st.sidebar.info(
 )
 
 # データ更新はローカル用に残しておく（Cloudでは基本使わない想定）
-do_update = st.sidebar.button("データ更新（scrape_update）", width="stretch")
+do_update = st.sidebar.button("データ更新（scrape_update）", use_container_width=True)
 
 with st.sidebar.expander("⚙ 設定（基本）", expanded=True):
     payout_mode = st.radio("払戻の基準", ["実績（historyの金額を使う）", "固定（下の金額）"], index=0)
@@ -499,15 +744,15 @@ with st.sidebar.expander("🧪 デバッグ", expanded=False):
         st.write(f"(list error: {e})")
 
 with st.sidebar.expander("🧹 キャッシュ", expanded=False):
-    if st.button("Cache クリア & 再実行", width="stretch"):
+    if st.button("Cache クリア & 再実行", use_container_width=True):
         st.cache_data.clear()
         st.cache_resource.clear()
         st.rerun()
 
 with st.sidebar.expander("🛠 高度な操作（学習/バックフィル）", expanded=False):
-    do_train = st.button("学習（V4）", width="stretch", key="train")
-    do_backfill_hist = st.button("バックフィル（予測履歴）", width="stretch", key="bf_hist")
-    do_backfill_ev   = st.button("バックフィル（EV）", width="stretch", key="bf_ev")
+    do_train = st.button("学習（V4）", use_container_width=True, key="train")
+    do_backfill_hist = st.button("バックフィル（予測履歴）", use_container_width=True, key="bf_hist")
+    do_backfill_ev   = st.button("バックフィル（EV）", use_container_width=True, key="bf_ev")
 
 
 # ============ データ更新（ローカル用） ============
@@ -704,6 +949,12 @@ with c3: components.html(badge_html("次回 回号（推定）",  idx_str),   he
 
 st.markdown("---")
 
+# 🎯 今日の予測カード（next_prediction.csv ベース）
+df_next_for_cards = load_next_prediction()
+render_today_cards(df_next_for_cards, topn=3)
+
+st.markdown("---")
+
 
 # ============ EVレポート読込 & 並び ============
 df_ev = read_csv_safe(EV_CSV)
@@ -818,7 +1069,6 @@ st.markdown("---")
 
 
 # ============ 検証（成績と信頼度） ============
-
 st.subheader("検証（成績と信頼度）")
 left, right = st.columns(2)
 with left:
@@ -1087,7 +1337,6 @@ else:
     dfh = ensure_joint_prob(dfh)
 
     # 🔥 ここが今回のポイント：1日=1本の pick に正規化
-    #    （候補_3桁_pick がある行を最優先で採用）
     dfh = _reduce_to_one_pick_for_eval(dfh)
 
     # date_key がなくなっている可能性があるので再生成
@@ -1252,6 +1501,11 @@ else:
         file_name="prediction_history_view.csv",
         mime="text/csv",
     )
+
+
+# ============ 説明カード（UX向上セクション） ============
+st.markdown("---")
+render_explanation_cards()
 
 
 # ============ 詳細テーブル（参考） ============

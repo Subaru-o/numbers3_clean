@@ -958,9 +958,12 @@ st.markdown("---")
 
 # ============ EVレポート読込 & 並び ============
 df_ev = read_csv_safe(EV_CSV)
-if df_ev is None: df_ev = pd.DataFrame()
+if df_ev is None:
+    df_ev = pd.DataFrame()
+
 if not df_ev.empty:
     df_ev = ensure_joint_prob(df_ev)
+
     if "候補_3桁" not in df_ev.columns:
         if all(c in df_ev.columns for c in ["百","十","一"]):
             df_ev["候補_3桁"] = (
@@ -969,103 +972,39 @@ if not df_ev.empty:
                 pd.to_numeric(df_ev["一"], errors="coerce").fillna(0).astype(int).astype(str)
             )
         elif "候補番号" in df_ev.columns:
-            df_ev["候補_3桁"] = pd.to_numeric(df_ev["候補番号"], errors="coerce").fillna(0).astype(int).astype(str).str.zfill(3)
+            df_ev["候補_3桁"] = (
+                pd.to_numeric(df_ev["候補番号"], errors="coerce")
+                  .fillna(0).astype(int).astype(str).str.zfill(3)
+            )
         elif "番号" in df_ev.columns:
-            df_ev["候補_3桁"] = pd.to_numeric(df_ev["番号"], errors="coerce").fillna(0).astype(int).astype(str).str.zfill(3)
+            df_ev["候補_3桁"] = (
+                pd.to_numeric(df_ev["番号"], errors="coerce")
+                  .fillna(0).astype(int).astype(str).str.zfill(3)
+            )
         else:
             df_ev["候補_3桁"] = ""
+
     df_ev["候補_3桁"] = df_ev["候補_3桁"].map(fmt3)
-    jp = pd.to_numeric(df_ev["joint_prob"], errors="coerce").fillna(0.0).clip(0,1)
+
+    jp = pd.to_numeric(df_ev["joint_prob"], errors="coerce").fillna(0.0).clip(0, 1)
     df_ev["EV_gross"] = jp * float(payout)
     df_ev["EV_net"]   = df_ev["EV_gross"] - float(price)
-    sort_cols = [c for c in ["EV_net","EV_gross","joint_prob"] if c in df_ev.columns]
-    df_ev = df_ev.sort_values(sort_cols, ascending=[False]*len(sort_cols)).reset_index(drop=True)
 
+    sort_cols = [c for c in ["EV_net", "EV_gross", "joint_prob"] if c in df_ev.columns]
+    df_ev = df_ev.sort_values(sort_cols, ascending=[False] * len(sort_cols)).reset_index(drop=True)
 
-# ============ 最新Top1 ============
-st.subheader("最新の予測（Top1）")
-if not df_ev.empty:
+    # ★ Top1 の情報だけは履歴に保存（画面には出さない）
     top = df_ev.iloc[0]
-    num3 = safe_to3(top.get("候補_3桁", top.get("番号","")))
-    components.html(digit_boxes_html(num3), height=90)
     target_date = next_draw_from_history() or date.today()
-    st.session_state["latest_pick_num3"] = fmt3(num3)
+    num3 = fmt3(top.get("候補_3桁", top.get("番号", "")))
+    st.session_state["latest_pick_num3"] = num3
     st.session_state["latest_pick_date"] = target_date
     persist_today_pick(
         pick_date=target_date,
-        pick_num3=fmt3(num3),
+        pick_num3=num3,
         ev_adj=float(top.get("EV_net", 0)),
-        prob=float(top.get("joint_prob", 0))
+        prob=float(top.get("joint_prob", 0)),
     )
-else:
-    st.info("EVレポート(ev_report.csv)が見つかりません。\nローカルで最新化スクリプトを実行し、GitHub に push してください。")
-
-st.markdown("---")
-
-
-# ============ おすすめ Top3 ============
-st.subheader("おすすめ Top3（EV順）")
-cols = st.columns(3)
-def card_html(rank: int, row: pd.Series, price: float, payout: float) -> str:
-    if "候補_3桁" in row.index and str(row["候補_3桁"]):
-        num3 = safe_to3(row["候補_3桁"])
-    elif "番号" in row.index:
-        num3 = safe_to3(row["番号"])
-    elif all(c in row.index for c in ["百","十","一"]):
-        try:
-            num3 = f"{int(row['百'])}{int(row['十'])}{int(row['一'])}"
-        except Exception:
-            num3 = ""
-    else:
-        num3 = ""
-
-    p_eff  = float(pd.to_numeric(pd.Series([row.get("joint_prob", 0)]), errors="coerce").fillna(0).iloc[0])
-    ev_net = float(pd.to_numeric(pd.Series([row.get("EV_net", 0)]),       errors="coerce").fillna(0).iloc[0])
-    fs     = str(row.get("feature_set", "—"))
-    mdl    = str(row.get("model_name", "—"))
-
-    return f"""
-<div style="display:flex;flex-direction:column;gap:10px;border:1px solid #ddd;
-            border-radius:14px;background:#fff;padding:16px;min-width:280px;
-            max-width:360px;flex:1 1 0;box-shadow:0 1px 2px rgba(0,0,0,0.06);">
-  <div style="display:flex;align-items:center;gap:8px;color:#888;font-size:12px;">
-    <b style="color:#333">#{rank}</b>
-    <span style="border:1px solid #eee;border-radius:999px;padding:2px 8px;background:#fafafa;">期待値で選定</span>
-  </div>
-  {digit_boxes_html(num3)}
-  <div style="margin-top:6px;line-height:1.8;">
-    <div>期待値: <b>{ev_net:,.0f} 円</b></div>
-    <div>当選確率（モデル計算）: <b>{p_eff * 100:.2f}%</b></div>
-  </div>
-  <div style="margin-top:6px;font-size:12px;color:#666;">
-    <span style="border:1px solid #eee;border-radius:999px;padding:2px 8px;background:#fafafa;">feature: {fs}</span>
-    <span style="margin-left:6px;border:1px solid #eee;border-radius:999px;padding:2px 8px;background:#fafafa;">model: {mdl}</span>
-  </div>
-</div>
-""".strip()
-
-if df_ev.empty:
-    for i in range(3):
-        with cols[i]:
-            st.info("データなし")
-else:
-    n = min(3, len(df_ev))
-    for i in range(3):
-        with cols[i]:
-            if i < n:
-                components.html(card_html(i+1, df_ev.iloc[i], price=float(price), payout=float(payout)), height=300)
-            else:
-                st.info("データなし")
-
-if not df_ev.empty:
-    st.download_button(
-        "EVレポートをダウンロード（CSV）",
-        df_ev.to_csv(index=False, encoding="utf-8-sig"),
-        file_name="ev_report_view.csv",
-        mime="text/csv",
-    )
-
-st.markdown("---")
 
 
 # ============ 検証（成績と信頼度） ============
